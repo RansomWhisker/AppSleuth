@@ -7,7 +7,7 @@ name = "appsleuth"
 version = "1.0.1"
 description = "Static security scanner, info, diff and app-data auditor for iOS (IPA) and Android (APK/APKS/XAPK/AAB) apps"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = { text = "MIT" }
 dependencies = []
 

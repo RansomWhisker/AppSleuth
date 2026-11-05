@@ -57,6 +57,21 @@ def expand_host(text: str) -> str:
 
 # --------------------------------------------------------------- safe extraction
 
+_WIN_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+
+
+def win_safe_name(name: str) -> str:
+    """Make a forward-slash relative path valid on Windows (device names, `:*?"<>|`,
+    trailing dots/spaces). Used only on Windows; kept pure so it is testable anywhere."""
+    out = []
+    for part in name.split("/"):
+        part = re.sub(r'[<>:"|?*\x00-\x1f]', "_", part).rstrip(". ") or "_"
+        if part.split(".")[0].upper() in _WIN_RESERVED:
+            part = "_" + part
+        out.append(part)
+    return "/".join(out)
+
+
 def safe_extract_tar(tar_path: str, dest: str, *, rename=None, max_files: int = DEFAULT_MAX_FILES,
                      max_bytes: int = DEFAULT_MAX_BYTES) -> Dict[str, Any]:
     """Unpack regular files and directories only. Returns {'modes': {rel: mode}, 'skipped': n, ...}.
@@ -74,8 +89,10 @@ def safe_extract_tar(tar_path: str, dest: str, *, rename=None, max_files: int = 
                     continue
             if not name or name == ".":
                 continue
-            if os.path.isabs(name) or ".." in name.split("/"):
+            if os.path.isabs(name) or ".." in name.replace("\\", "/").split("/") or re.match(r"^[A-Za-z]:", name):
                 raise PullError(f"unsafe path in archive: {clean(m.name)!r}")
+            if IS_WIN:
+                name = win_safe_name(name)
             target = os.path.realpath(os.path.join(root, name))
             if not target.startswith(root + os.sep):
                 raise PullError(f"archive entry escapes the output directory: {clean(m.name)!r}")
@@ -103,9 +120,38 @@ def safe_extract_tar(tar_path: str, dest: str, *, rename=None, max_files: int = 
 
 # --------------------------------------------------------------------------- iOS
 
+IS_WIN = os.name == "nt"
+# OpenSSH on Windows has no ControlMaster, so there each command logs in separately.
+SHARE_CONNECTION = not IS_WIN
+
+
+def private_tmpdir(prefix: str) -> str:
+    """0700 temp dir. /tmp (when it exists) keeps Unix-socket paths short on macOS."""
+    return tempfile.mkdtemp(prefix=prefix, dir="/tmp" if os.path.isdir("/tmp") else None)
+
+
+def make_askpass(tmp: str, var: str, password: str) -> Dict[str, str]:
+    """SSH_ASKPASS helper + environment. The password lives only in the child's
+    environment, never in the helper file or on a command line."""
+    if IS_WIN:
+        py = os.path.join(tmp, "askpass.py")
+        helper = os.path.join(tmp, "askpass.cmd")
+        with open(py, "w") as fh:
+            fh.write(f"import os, sys\nsys.stdout.write(os.environ[{var!r}] + '\\n')\n")
+        with open(helper, "w") as fh:
+            fh.write(f'@"{sys.executable}" "{py}"\r\n')
+    else:
+        helper = os.path.join(tmp, "askpass.sh")
+        with open(helper, "w") as fh:
+            fh.write(f'#!/bin/sh\nprintf "%s\\n" "${var}"\n')
+        os.chmod(helper, 0o700)
+    return dict(os.environ, **{var: password}, SSH_ASKPASS=helper, SSH_ASKPASS_REQUIRE="force")
+
+
 class SSH:
     """One authenticated connection (ControlMaster) reused for every command, so the
-    password is entered once and there is no flood of failed logins."""
+    password is entered once and there is no flood of failed logins. Windows OpenSSH
+    cannot share connections, so there every command authenticates on its own."""
 
     def __init__(self, host: str, port: int = 22, user: str = "root", key: Optional[str] = None,
                  password: Optional[str] = None):
@@ -116,8 +162,9 @@ class SSH:
         if key and not os.path.isfile(key):
             raise PullError(f"SSH key not found: {key}")
         self.host, self.port, self.user, self.key, self.password = host, port, user, key, password
-        self.sock_dir = tempfile.mkdtemp(prefix="appsleuth-", dir="/tmp")      # mode 0700
+        self.sock_dir = private_tmpdir("appsleuth-")
         self.sock = os.path.join(self.sock_dir, "s")
+        self.env: Optional[Dict[str, str]] = None
 
     def _base(self) -> List[str]:
         b = ["ssh", "-p", str(self.port), "-o", "StrictHostKeyChecking=accept-new", "-o", "LogLevel=ERROR"]
@@ -126,21 +173,16 @@ class SSH:
         return b
 
     def open(self):
-        cmd = self._base() + ["-o", "ControlMaster=yes", "-o", f"ControlPath={self.sock}",
-                              "-o", "ControlPersist=10m", "-o", "NumberOfPasswordPrompts=1",
-                              f"{self.user}@{self.host}", "-fN"]
-        env, askpass = None, None
-        if self.password:
-            fd, askpass = tempfile.mkstemp(prefix="appsleuth_askpass_")
-            os.write(fd, b'#!/bin/sh\nprintf "%s\\n" "$APPSLEUTH_PW"\n')
-            os.close(fd)
-            os.chmod(askpass, 0o700)
-            env = dict(os.environ, APPSLEUTH_PW=self.password, SSH_ASKPASS=askpass, SSH_ASKPASS_REQUIRE="force")
-        try:
-            rc = subprocess.run(cmd, env=env).returncode
-        finally:
-            if askpass:
-                os.unlink(askpass)
+        env = make_askpass(self.sock_dir, "APPSLEUTH_PW", self.password) if self.password else None
+        tries = ["-o", "NumberOfPasswordPrompts=1"] if self.password else []
+        target = f"{self.user}@{self.host}"
+        if SHARE_CONNECTION:
+            cmd = self._base() + ["-o", "ControlMaster=yes", "-o", f"ControlPath={self.sock}",
+                                  "-o", "ControlPersist=10m", *tries, target, "-fN"]
+        else:
+            cmd = self._base() + [*tries, target, "true"]
+            self.env = env                      # needed again for every later command
+        rc = subprocess.run(cmd, env=env).returncode
         if rc != 0:
             self.close()
             raise PullError(f"SSH login to {self.user}@{self.host}:{self.port} failed "
@@ -149,23 +191,26 @@ class SSH:
 
     def close(self):
         if os.path.isdir(self.sock_dir):
-            subprocess.run(["ssh", "-O", "exit", "-o", f"ControlPath={self.sock}", f"{self.user}@{self.host}"],
-                           capture_output=True)
+            if SHARE_CONNECTION:
+                subprocess.run(["ssh", "-O", "exit", "-o", f"ControlPath={self.sock}", f"{self.user}@{self.host}"],
+                               capture_output=True)
             shutil.rmtree(self.sock_dir, ignore_errors=True)
 
     def _cmd(self) -> List[str]:
-        return self._base() + ["-o", "ControlMaster=no", "-o", f"ControlPath={self.sock}",
-                               f"{self.user}@{self.host}"]
+        if SHARE_CONNECTION:
+            return self._base() + ["-o", "ControlMaster=no", "-o", f"ControlPath={self.sock}",
+                                   f"{self.user}@{self.host}"]
+        return self._base() + [f"{self.user}@{self.host}"]
 
     def run(self, command: str, binary: bool = False, check: bool = True):
-        p = subprocess.run(self._cmd() + [command], capture_output=True)
+        p = subprocess.run(self._cmd() + [command], capture_output=True, env=self.env)
         if check and p.returncode != 0:
             raise PullError(f"remote command failed: {clean(p.stderr.decode(errors='replace').strip())}")
         return p.stdout if binary else p.stdout.decode(errors="replace")
 
     def stream_to_file(self, command: str, path: str, max_bytes: int):
         with open(path, "wb") as fh:
-            p = subprocess.Popen(self._cmd() + [command], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            p = subprocess.Popen(self._cmd() + [command], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env)
             total = 0
             try:
                 for chunk in iter(lambda: p.stdout.read(1 << 20), b""):

@@ -1503,7 +1503,7 @@ def collect_android_sbom(extract_dir: str, names: List[str]) -> List[Dict[str, s
             else:
                 lib_name = lib
             try:
-                version = open(os.path.join(extract_dir, n)).read().strip()
+                version = open(os.path.join(extract_dir, n), encoding="utf-8", errors="replace").read().strip()
             except Exception:
                 version = None
             # Some androidx .version files ship an unresolved Gradle lazy-property
@@ -2761,7 +2761,7 @@ def collect_aab_sbom(extract_dir: str, names: List[str]) -> List[Dict[str, str]]
             lib = m.group(1)
             lib_name = lib.replace("_", ":", 1) if "_" in lib else lib
             try:
-                version = open(os.path.join(extract_dir, n)).read().strip()
+                version = open(os.path.join(extract_dir, n), encoding="utf-8", errors="replace").read().strip()
             except Exception:
                 version = None
             if version and (len(version) > 60 or "property" in version.lower()):
@@ -2977,7 +2977,7 @@ def write_markdown_report(result: Dict[str, Any], path: str):
                 lines.append(f"- Evidence: `{ev}`")
             lines.append(f"- Confidence: {f.get('confidence', 'heuristic')}")
             lines.append("")
-    with open(path, "w") as fh:
+    with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
 
 
@@ -3064,7 +3064,7 @@ def write_html_report(result: Dict[str, Any], path: str):
   confirmed, exploitable vulnerabilities &mdash; see each finding's confidence field.</div>
   {"".join(sections)}
 </div></body></html>"""
-    with open(path, "w") as fh:
+    with open(path, "w", encoding="utf-8") as fh:
         fh.write(html_doc)
 
 
@@ -3115,7 +3115,7 @@ def write_baseline(result: Dict[str, Any], path: str):
     for f in result["findings"]:
         fp = f.get("fingerprint") or finding_fingerprint(f)
         baseline[fp] = {"title": f["title"], "location": f.get("location")}
-    with open(path, "w") as fh:
+    with open(path, "w", encoding="utf-8") as fh:
         json.dump(baseline, fh, indent=2)
 
 
@@ -3211,7 +3211,7 @@ def write_diff_markdown(diff: Dict[str, Any], path: str):
     if not (f_new or f_resolved):
         lines.append("No finding-level differences.")
 
-    with open(path, "w") as fh:
+    with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
 
 

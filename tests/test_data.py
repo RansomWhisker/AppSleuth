@@ -140,3 +140,27 @@ class Audit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WindowsSupport(unittest.TestCase):
+    def test_win_safe_name(self):
+        f = devdata.win_safe_name
+        self.assertEqual(f("Library/Caches/a:b*c?.txt"), "Library/Caches/a_b_c_.txt")
+        self.assertEqual(f("aux/NUL.txt/ok. "), "_aux/_NUL.txt/ok")
+        self.assertEqual(f("a/b"), "a/b")
+
+    def test_backslash_and_drive_traversal_refused(self):
+        for name in ("..\\evil", "a/..\\..\\evil", "C:evil", "C:/evil"):
+            with self.assertRaises(devdata.PullError, msg=name):
+                out = tempfile.mkdtemp()
+                devdata.safe_extract_tar(make_tar([(name, "file", b"x")]), out)
+
+    def test_askpass_never_stores_password(self):
+        pw = 'p@ss w0rd!&%^"\'$x'
+        tmp = tempfile.mkdtemp()
+        env = devdata.make_askpass(tmp, "APPSLEUTH_PW", pw)
+        for f in os.listdir(tmp):
+            self.assertNotIn(pw, open(os.path.join(tmp, f)).read())
+        import subprocess
+        out = subprocess.run([env["SSH_ASKPASS"]], env=env, capture_output=True, text=True).stdout
+        self.assertEqual(out.rstrip("\r\n"), pw)

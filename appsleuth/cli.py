@@ -74,19 +74,19 @@ def _append_triage_md(path: str, result: Dict[str, Any]):
         lines.append(f"- {len(t['dropped'])} duplicate finding(s) collapsed")
     if len(lines) == 3:
         lines.append("Nothing was demoted, ignored or hidden.")
-    with open(path, "a") as fh:
+    with open(path, "a", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
 
 
 def write_reports(result: Dict[str, Any], outdir: str, title: Optional[str] = None):
     os.makedirs(outdir, exist_ok=True)
-    with open(os.path.join(outdir, "report.json"), "w") as fh:
+    with open(os.path.join(outdir, "report.json"), "w", encoding="utf-8") as fh:
         json.dump(result, fh, indent=2, default=str)
     md = os.path.join(outdir, "report.md")
     engine.write_markdown_report(result, md)
     if title:
-        text = open(md).read().replace("# Mobile app static security scan:", f"# {title}:", 1)
-        open(md, "w").write(text)
+        text = open(md, encoding="utf-8").read().replace("# Mobile app static security scan:", f"# {title}:", 1)
+        open(md, "w", encoding="utf-8").write(text)
     _append_triage_md(md, result)
     engine.write_html_report(result, os.path.join(outdir, "report.html"))
 
@@ -198,9 +198,9 @@ def cmd_diff(a):
         shutil.rmtree(tmp, ignore_errors=True)
     outdir = a.outdir or f"diff_{os.path.splitext(os.path.basename(a.old))[0]}_vs_{os.path.splitext(os.path.basename(a.new))[0]}"
     os.makedirs(outdir, exist_ok=True)
-    with open(os.path.join(outdir, "diff.json"), "w") as fh:
+    with open(os.path.join(outdir, "diff.json"), "w", encoding="utf-8") as fh:
         json.dump(d, fh, indent=2, default=str)
-    with open(os.path.join(outdir, "diff.md"), "w") as fh:
+    with open(os.path.join(outdir, "diff.md"), "w", encoding="utf-8") as fh:
         fh.write(diff_mod.render_markdown(d))
 
     if a.format == "json":
@@ -290,7 +290,7 @@ def cmd_data(a):
 
     os.chmod(out, 0o700)
     mf = {k: v for k, v in manifest.items() if k != "modes"}
-    with open(os.path.join(out, "pull_manifest.json"), "w") as fh:
+    with open(os.path.join(out, "pull_manifest.json"), "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=1)
     print(f"[+] {mf['files']} files, {mf['bytes'] / 1e6:.1f} MB via {mf['method']} -> {out}/data")
     if mf.get("skipped_links_or_special"):
@@ -408,6 +408,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None):
+    for _s in (sys.stdout, sys.stderr):      # Windows consoles default to a legacy codepage
+        try:
+            _s.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "version":
         print(f"appsleuth {__version__}")
