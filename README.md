@@ -15,7 +15,8 @@ One tool for mobile app security triage. Works on **IPA**, **APK**, **APKS/XAPK*
 
 ## Install
 
-    pip install .          # gives you the `appsleuth` command
+    pipx install git+https://github.com/RansomWhisker/AppSleuth   # recommended
+    pip install .          # or, from a clone: gives you the `appsleuth` command
     python3 -m appsleuth …   # or run in place
 
 ## Examples
