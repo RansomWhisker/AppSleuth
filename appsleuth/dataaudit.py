@@ -106,7 +106,7 @@ def _walk(root: str) -> Iterator[Tuple[str, str]]:
             full = os.path.join(d, fn)
             if os.path.islink(full) or not os.path.isfile(full):
                 continue
-            yield full, os.path.relpath(full, root)
+            yield full, os.path.relpath(full, root).replace(os.sep, "/")
 
 
 def _read(full: str, limit: int = MAX_FILE) -> bytes:

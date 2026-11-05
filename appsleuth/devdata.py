@@ -89,7 +89,7 @@ def safe_extract_tar(tar_path: str, dest: str, *, rename=None, max_files: int = 
                     continue
             if not name or name == ".":
                 continue
-            if os.path.isabs(name) or ".." in name.replace("\\", "/").split("/") or re.match(r"^[A-Za-z]:", name):
+            if os.path.isabs(name) or name.startswith("/") or ".." in name.replace("\\", "/").split("/") or re.match(r"^[A-Za-z]:", name):
                 raise PullError(f"unsafe path in archive: {clean(m.name)!r}")
             if IS_WIN:
                 name = win_safe_name(name)

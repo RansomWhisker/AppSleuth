@@ -40,7 +40,8 @@ class SafeExtract(unittest.TestCase):
         self.assertEqual(os.listdir(out), ["ok"])
         self.assertEqual(m["skipped_links_or_special"], 1)
         self.assertEqual(m["modes"]["ok"], 0o666)
-        self.assertEqual(os.stat(os.path.join(out, "ok")).st_mode & 0o777, 0o600)
+        if os.name != "nt":                              # Windows has no POSIX mode bits
+            self.assertEqual(os.stat(os.path.join(out, "ok")).st_mode & 0o777, 0o600)
 
     def test_caps(self):
         with self.assertRaises(devdata.PullError):
@@ -71,7 +72,8 @@ class Audit(unittest.TestCase):
     def put(self, rel, data):
         p = os.path.join(self.root, rel)
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        open(p, "wb").write(data)
+        with open(p, "wb") as fh:
+            fh.write(data)
         return p
 
     def titles(self, **kw):
@@ -121,6 +123,7 @@ class Audit(unittest.TestCase):
         p = os.path.join(self.root, "x.db")
         c = sqlite3.connect(p); c.execute("create table t(a)"); c.commit(); c.close()
         conn = dataaudit._open_sqlite(p)
+        self.addCleanup(conn.close)
         with self.assertRaises(sqlite3.Error):
             conn.execute("insert into t values (1)")
         with self.assertRaises(sqlite3.Error):
@@ -160,7 +163,8 @@ class WindowsSupport(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         env = devdata.make_askpass(tmp, "APPSLEUTH_PW", pw)
         for f in os.listdir(tmp):
-            self.assertNotIn(pw, open(os.path.join(tmp, f)).read())
+            with open(os.path.join(tmp, f)) as fh:
+                self.assertNotIn(pw, fh.read())
         import subprocess
         out = subprocess.run([env["SSH_ASKPASS"]], env=env, capture_output=True, text=True).stdout
         self.assertEqual(out.rstrip("\r\n"), pw)

@@ -1956,7 +1956,7 @@ def analyze_apks(path: str, workdir: str) -> Tuple[FindingsBag, Dict[str, Any]]:
     all_signers = []
 
     for i, apk_path in enumerate(apk_entries):
-        label = os.path.relpath(apk_path, extract_dir)
+        label = os.path.relpath(apk_path, extract_dir).replace(os.sep, "/")
         sub_findings, sub_meta = analyze_apk(apk_path, workdir, label=label)
         meta["splits"].append({"name": label, "size_bytes": os.path.getsize(apk_path), "meta": sub_meta})
         for c in sub_meta.get("signing_certs", []):
@@ -1981,7 +1981,7 @@ def analyze_apks(path: str, workdir: str) -> Tuple[FindingsBag, Dict[str, Any]]:
                       "Analysis above focuses on the split most likely to be the base/master APK "
                       f"({meta.get('base_split')}); MEDIUM+ findings from other splits are also included, "
                       "each tagged with its split name.",
-                      evidence=", ".join(os.path.relpath(p, extract_dir) for p in apk_entries))
+                      evidence=", ".join(os.path.relpath(p, extract_dir).replace(os.sep, "/") for p in apk_entries))
 
     fingerprints = {fp for _label, fp in all_signers}
     if len(fingerprints) > 1:
@@ -2318,7 +2318,7 @@ def analyze_hybrid_web(app_dir: str, frameworks: List[str], findings: "FindingsB
             full = os.path.join(root, fn)
             if os.path.islink(full):
                 continue
-            rel = os.path.relpath(full, app_dir)
+            rel = os.path.relpath(full, app_dir).replace(os.sep, "/")
             low = fn.lower()
             if low.endswith(".map"):
                 maps.append(rel)
