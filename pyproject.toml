@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "appsleuth"
+version = "1.0.0"
+description = "Static security scanner, info, diff and app-data auditor for iOS (IPA) and Android (APK/APKS/XAPK/AAB) apps"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+dependencies = []
+
+[project.scripts]
+appsleuth = "appsleuth.cli:main"
+
+[tool.setuptools]
+packages = ["appsleuth"]
+
+[project.urls]
+Homepage = "https://rudranetra.com/tools"
+Source = "https://github.com/RansomWhisker/AppSleuth"

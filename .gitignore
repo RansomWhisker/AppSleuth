@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.DS_Store
+.env
+*.pem
+id_*
+*.ipa
+*.apk
+*.apks
+*.xapk
+*.aab
+.appsleuth-ignore
