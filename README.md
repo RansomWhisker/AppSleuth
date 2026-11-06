@@ -61,7 +61,7 @@ Observe what a running app really does, using Frida: root/jailbreak checks, plai
     appsleuth runtime --android com.example.app --seconds 90
     appsleuth runtime --ios com.example.app --spawn
 
-It is **observe-only** (no bypasses, nothing patched) and never stores values, only key names and descriptions. Use the app during the window: it can only report what it sees. **Status:** iOS has been tested on a real jailbroken device (Dopamine, Frida 17) against two apps; Android has been built the same way but **not yet tested with Frida on a device** (the Android `data` pull and audit have been tested on a rooted Pixel). The `pip` Frida version must match the `frida-server` on the phone. Only calls made while the probe runs are visible, and results are leads, not proof. Probes count only calls from the app's own code, not from the jailbreak's tweak loader.
+It is **observe-only** (no bypasses, nothing patched) and never stores values, only key names and descriptions. Use the app during the window: it can only report what it sees. **Status:** tested on a real jailbroken iPhone (Dopamine, Frida 17) and a rooted Pixel 6a (Android 16, Frida 17.15). On Android, `--spawn` falls back to a delayed attach if an app crashes under early instrumentation, and attaching to a running app finds it by package name. The `pip` Frida version must match the `frida-server` on the phone. Only calls made while the probe runs are visible, and results are leads, not proof. Probes count only calls from the app's own code, not from the jailbreak's tweak loader.
 
 ## Keeping false positives low
 

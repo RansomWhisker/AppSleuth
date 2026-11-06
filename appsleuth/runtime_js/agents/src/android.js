@@ -6,7 +6,13 @@ function emit(t, o) { send(Object.assign({ t: t }, o || {})); }
 function trunc(s, n) { s = String(s); return s.length > n ? s.slice(0, n) : s; }
 
 Java.perform(function () {
-  function tryHook(fn) { try { fn(); } catch (e) { emit('probe_error', { what: String(e) }); } }
+  function tryHook(fn) {
+    try { fn(); } catch (e) {
+      var m = String(e);
+      if (/ClassNotFoundException|NoSuchMethodError|no such method|not a function/i.test(m)) return;   // library not in this app
+      emit('probe_error', { what: m.slice(0, 200) });
+    }
+  }
 
   // --- root / tamper checks the app performs --------------------------------------------
   tryHook(function () {

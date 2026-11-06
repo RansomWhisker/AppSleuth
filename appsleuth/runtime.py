@@ -11,6 +11,7 @@ Only run it against apps and devices you are authorised to test.
 from __future__ import annotations
 
 import os
+import sys
 import re
 import time
 from collections import Counter
@@ -164,13 +165,52 @@ def run_probe(platform: str, target: str, *, seconds: int = 60, spawn: bool = Fa
         if msg.get("type") == "send" and isinstance(msg.get("payload"), dict) and len(events) < MAX_EVENTS:
             events.append(msg["payload"])
 
-    pid = dev.spawn([target]) if spawn else None
-    session = dev.attach(pid if spawn else target)
-    script = session.create_script(source)
-    script.on("message", on_message)
-    script.load()
+    state = {"detached": None}
+
+    def start(pid: int, resume_first: bool):
+        """Attach and load the agent. resume_first: let the app boot, then attach (avoids ART crashes
+        that some apps hit when instrumented before they start)."""
+        if resume_first:
+            dev.resume(pid)
+            time.sleep(2.0)
+        session = dev.attach(pid)
+        session.on("detached", lambda reason, *_: state.__setitem__("detached", reason))
+        script = session.create_script(source)
+        script.on("message", on_message)
+        script.load()
+        if not resume_first and spawn:
+            dev.resume(pid)
+        return session, script
+
+    pid = None
     if spawn:
-        dev.resume(pid)
+        pid = dev.spawn([target])
+        try:
+            session, script = start(pid, False)
+            time.sleep(4)                      # an early crash shows up as: no 'ready' event, session detached
+            crashed = state["detached"] is not None and not any(e.get("t") == "ready" for e in events)
+        except Exception:
+            session = script = None
+            crashed = True
+        if crashed:
+            print("[!] The app did not survive early instrumentation; retrying with a delayed attach "
+                  "(very early startup checks will be missed).", file=sys.stderr)
+            try:
+                dev.kill(pid)
+            except Exception:
+                pass
+            state["detached"] = None
+            events.clear()
+            pid = dev.spawn([target])
+            session, script = start(pid, True)
+    else:
+        for app in dev.enumerate_applications():          # Frida names processes by label, not package
+            if app.identifier == target and app.pid:
+                pid = app.pid
+                break
+        if pid is None:
+            raise RuntimeError(f"{target} is not running; start it first, or use --spawn")
+        session, script = start(pid, False)
     try:
         time.sleep(max(1, seconds))
     except KeyboardInterrupt:
