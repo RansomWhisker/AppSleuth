@@ -1993,8 +1993,17 @@ def analyze_apks(path: str, workdir: str) -> Tuple[FindingsBag, Dict[str, Any]]:
                       "each tagged with its split name.",
                       evidence=", ".join(os.path.relpath(p, extract_dir).replace(os.sep, "/") for p in apk_entries))
 
-    fingerprints = {fp for _label, fp in all_signers}
-    if len(fingerprints) > 1:
+    # Key rotation puts the old cert (v2 block) and the new cert (v3 block) in the same APK, so one
+    # split can legitimately list several certs. Splits are consistent if every split shares at
+    # least one certificate with the others (the rotation lineage); flag only disjoint signer sets.
+    per_split: Dict[str, set] = {}
+    for _label, fp in all_signers:
+        per_split.setdefault(_label, set()).add(fp)
+    sets = list(per_split.values())
+    common = set.intersection(*sets) if sets else set()
+    disjoint = len(sets) > 1 and not common and any(
+        not (a & b) for i, a in enumerate(sets) for b in sets[i + 1:])
+    if disjoint:
         findings.add("HIGH", "Splits are signed with different certificates",
                       "Not all APK splits in this bundle share the same signer certificate. Android requires "
                       "all splits of an installed app to share a signer; a mismatch here suggests either a "

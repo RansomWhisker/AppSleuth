@@ -100,3 +100,15 @@ class CoverageWarnings(unittest.TestCase):
         from appsleuth import info
         r = result("ipa", [], {"embedded_binaries_still_encrypted": ["Frameworks/X.framework/X"]})
         self.assertIn("X.framework", info.coverage_warnings(r)[0])
+
+
+class TestFixtures(unittest.TestCase):
+    T = "Possible hardcoded secret: JWT (decodes as a valid token)"
+
+    def test_test_fixture_class_demoted(self):
+        out = triage.apply(result("apk", [
+            F("HIGH", self.T, "base.apk:dex (classes.dex) [Lcom/google/api/client/testing/json/webtoken/TestCertificates;->getJsonWebSignature()]"),
+            F("HIGH", self.T, "base.apk:dex (classes.dex) [Lcom/example/app/Session;->token()]")]))
+        sev = {f["location"].split("[")[-1][:25]: f["severity"] for f in out["findings"]}
+        self.assertEqual(sorted(sev.values()), ["HIGH", "INFO"])
+        self.assertEqual(sev["Lcom/example/app/Session;"], "HIGH")

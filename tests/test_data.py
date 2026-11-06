@@ -168,3 +168,12 @@ class WindowsSupport(unittest.TestCase):
         import subprocess
         out = subprocess.run([env["SSH_ASKPASS"]], env=env, capture_output=True, text=True).stdout
         self.assertEqual(out.rstrip("\r\n"), pw)
+
+
+class FeatureFlagKeys(unittest.TestCase):
+    def test_flags_are_not_credentials(self):
+        for k in ("__phenotype_server_token", "ph_server_token", "Backend__refresh_token_with_bind_open",
+                  "FdlLinks__invite_itunes_connect_provider_token"):
+            self.assertIsNone(dataaudit.sensitive_key(k), k)
+        for k in ("AuthToken", "RefreshToken", "session_id", "password"):
+            self.assertIsNotNone(dataaudit.sensitive_key(k), k)

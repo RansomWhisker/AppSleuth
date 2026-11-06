@@ -154,3 +154,21 @@ class Cloud(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SbomUserAgent(unittest.TestCase):
+    def comps(self, ua: bytes):
+        path = tempfile.mktemp(suffix=".apk")
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("AndroidManifest.xml", b"\x00")
+            z.writestr("classes.dex", b"dex\n035\x00" + ua)
+        from appsleuth import appfiles
+        with appfiles.unpacked(path) as app:
+            return sbom.collect(app)
+
+    def test_okhttp_versions(self):
+        names = {(c["name"], c["version"]) for c in self.comps(b"okhttp/3.12.13 okhttp/1.81.0")}
+        self.assertIn(("com.squareup.okhttp3:okhttp", "3.12.13"), names)
+        self.assertFalse([n for n in names if n[1].startswith("1.")])
+        old = {(c["name"], c["version"]) for c in self.comps(b"okhttp/2.7.5")}
+        self.assertEqual(old, {("com.squareup.okhttp:okhttp", "2.7.5")})

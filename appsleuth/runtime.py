@@ -140,6 +140,26 @@ def events_to_result(events: Iterable[Dict[str, Any]], platform: str, target: st
     }
 
 
+def _pick_usb_device(frida, platform: str):
+    """The USB device running `platform`. get_usb_device() alone picks whichever phone is first,
+    which is wrong when an iPhone and an Android phone are both attached."""
+    matches = []
+    for d in frida.enumerate_devices():
+        if d.type != "usb":
+            continue
+        try:
+            if d.query_system_parameters().get("os", {}).get("id") == platform:
+                matches.append(d)
+        except Exception:
+            continue
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise RuntimeError(f"several {platform} devices connected; choose one with --device ID "
+                           f"({', '.join(d.id for d in matches)})")
+    return frida.get_usb_device(timeout=10)
+
+
 def run_probe(platform: str, target: str, *, seconds: int = 60, spawn: bool = False,
               device_id: Optional[str] = None, host: Optional[str] = None) -> List[Dict[str, Any]]:
     """Attach (or spawn) with Frida and collect events for `seconds`. Needs the frida module."""
@@ -156,7 +176,7 @@ def run_probe(platform: str, target: str, *, seconds: int = 60, spawn: bool = Fa
     elif device_id:
         dev = frida.get_device(device_id, timeout=10)
     else:
-        dev = frida.get_usb_device(timeout=10)
+        dev = _pick_usb_device(frida, platform)
     with open(os.path.join(JS_DIR, f"{platform}.js"), encoding="utf-8") as fh:
         source = fh.read()
     events: List[Dict[str, Any]] = []

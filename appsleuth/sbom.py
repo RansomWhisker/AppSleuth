@@ -108,10 +108,18 @@ def collect(app: appfiles.App) -> List[Dict[str, Any]]:
                         continue
                     for rx, g, a in _DEX_FINGERPRINTS:
                         m = rx.search(blob)
-                        if m:
-                            _add(found, {"name": f"{g}:{a}", "group": g, "artifact": a,
-                                         "version": m.group(1).decode(), "ecosystem": "Maven",
-                                         "source": n + " (user-agent string)", "type": "library"})
+                        if not m:
+                            continue
+                        version = m.group(1).decode()
+                        major = int(version.split(".")[0])
+                        if a == "okhttp":
+                            if major not in (2, 3, 4, 5):          # other libraries send "okhttp/1.x"-style strings
+                                continue
+                            if major == 2:                          # OkHttp 2 used the pre-okhttp3 coordinates
+                                g = "com.squareup.okhttp"
+                        _add(found, {"name": f"{g}:{a}", "group": g, "artifact": a,
+                                     "version": version, "ecosystem": "Maven",
+                                     "source": n + " (user-agent string)", "type": "library"})
     else:
         base = app.main_root
         if base:

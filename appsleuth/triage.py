@@ -127,6 +127,9 @@ def _fp(f: Dict[str, Any]) -> str:
     return hashlib.sha256(basis.encode("utf-8", errors="replace")).hexdigest()[:16]
 
 
+_TEST_CLASS = re.compile(r"\[L[^;\]]*(/testing/|/test/|Test[A-Z][A-Za-z]*;|Tests;|/Test[A-Za-z]*;)")
+
+
 def apply(result: Dict[str, Any], *, rules: Optional[List[IgnoreRule]] = None,
           min_severity: Optional[str] = None, min_confidence: Optional[str] = None,
           corroborate: bool = True) -> Dict[str, Any]:
@@ -169,6 +172,15 @@ def apply(result: Dict[str, Any], *, rules: Optional[List[IgnoreRule]] = None,
             if "AndroidManifest.xml" in m.group(2):
                 dropped.append({"title": f["title"], "why": "repeats base manifest finding"})
                 continue
+
+        # 2c. secrets that live in a library's own test fixtures are sample data, not the app's secrets
+        if (f["severity"] in ("HIGH", "MEDIUM") and f["title"].startswith("Possible hardcoded secret")
+                and _TEST_CLASS.search(loc)):
+            demoted.append({"title": f["title"], "from": f["severity"], "to": "INFO",
+                            "why": "found in a test-fixture class of a library"})
+            f["original_severity"] = f["severity"]
+            f["severity"] = "INFO"
+            f["detail"] += " Triage: demoted because the string is referenced only from a test-fixture class."
 
         # 3. de-duplication
         key = (f["title"], f.get("location"), f.get("evidence"))

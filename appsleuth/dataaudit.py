@@ -44,6 +44,8 @@ def sensitive_key(key: str) -> Optional[str]:
         return None
     if words[0] in _BOOL_PREFIX and len(words) > 1:
         return None
+    if "__" in str(key) or "phenotype" in "".join(words) or str(key).startswith("ph_"):
+        return None          # remote-config / feature-flag namespaces (Google "phenotype", `Area__flag_name`), not credentials
     if set(words) & {"count", "enabled", "expires", "expiry", "expiration", "timestamp", "hint", "label",
                      "policy", "length", "type", "url", "uri"}:
         return None
