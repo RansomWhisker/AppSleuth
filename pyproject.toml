@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "appsleuth"
-version = "1.0.2"
+version = "1.1.0"
 description = "Static security scanner, info, diff and app-data auditor for iOS (IPA) and Android (APK/APKS/XAPK/AAB) apps"
 readme = "README.md"
 requires-python = ">=3.9"
