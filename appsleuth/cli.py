@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 
 from . import __version__, diff as diff_mod, engine, info as info_mod, triage
 
-COMMANDS = ("scan", "info", "diff", "data", "runtime", "version")
+COMMANDS = ("scan", "info", "diff", "data", "runtime", "sbom", "endpoints", "links", "cloud", "version")
 _SEV_RANK = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3}
 
 
@@ -246,6 +246,62 @@ def cmd_diff(a):
             sys.exit(4)
 
 
+# ------------------------------------------------------------------ intel commands
+
+def _intel_report(res: Dict[str, Any], a, title: str, default_dir: str):
+    res = triage.apply(res, rules=_rules(a, a.target), min_severity=a.min_severity, corroborate=False)
+    out = a.outdir or f"{default_dir}_{os.path.splitext(os.path.basename(a.target))[0]}"
+    write_reports(res, out, title)
+    print(f"{os.path.basename(a.target)}: {_counts(res['summary'])}")
+    print_findings(res, verbose=a.verbose, show=a.show)
+    print(f"Reports: {out}/report.html  report.md  report.json")
+    return res, out
+
+
+def _need_file(a):
+    if not os.path.isfile(a.target):
+        die(f"file not found: {a.target}", 2)
+
+
+def cmd_sbom(a):
+    from . import sbom
+    _need_file(a)
+    res, cdx = sbom.run(a.target, cves=a.cves, offline=a.offline)
+    res, out = _intel_report(res, a, "Software bill of materials", "sbom")
+    path = os.path.join(out, "sbom.cdx.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(cdx, fh, indent=2)
+    print(f"CycloneDX SBOM: {path}")
+    if not a.cves:
+        print("Tip: add --cves to look components up on OSV.dev (sends component names and versions only).")
+
+
+def cmd_endpoints(a):
+    from . import endpoints
+    _need_file(a)
+    res = endpoints.run(a.target)
+    res, out = _intel_report(res, a, "Endpoint inventory", "endpoints")
+    with open(os.path.join(out, "endpoints.txt"), "w", encoding="utf-8") as fh:
+        fh.write(endpoints.render_text(res, limit=100000))
+
+
+def cmd_links(a):
+    from . import links
+    _need_file(a)
+    res = links.run(a.target, check_network=a.check_network)
+    _intel_report(res, a, "Deep links and URL schemes", "links")
+
+
+def cmd_cloud(a):
+    from . import cloud
+    _need_file(a)
+    if a.check:
+        print("[*] --check sends read-only, unauthenticated requests to the app's cloud backends. "
+              "Only use it on apps you are authorised to test.", file=sys.stderr)
+    res = cloud.run(a.target, check=a.check)
+    _intel_report(res, a, "Cloud backend check", "cloud")
+
+
 # ------------------------------------------------------------------------ data
 
 def cmd_runtime(a):
@@ -380,7 +436,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="appsleuth", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"appsleuth {__version__}")
-    sub = ap.add_subparsers(dest="cmd", metavar="{scan,info,diff,data}")
+    sub = ap.add_subparsers(dest="cmd", metavar="{scan,info,diff,data,runtime,sbom,endpoints,links,cloud}")
 
     def triage_opts(p):
         p.add_argument("--ignore-file", help="ignore rules (default: ./.appsleuth-ignore if present)")
@@ -463,6 +519,25 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--ignore-file")
     r.add_argument("--min-severity", choices=["INFO", "LOW", "MEDIUM", "HIGH"])
     r.set_defaults(fn=cmd_runtime)
+    def intel(name, helptext, fn):
+        p = sub.add_parser(name, help=helptext)
+        p.add_argument("target", help="IPA, APK, APKS/XAPK or AAB")
+        p.add_argument("-o", "--outdir")
+        p.add_argument("--show", choices=["HIGH", "MEDIUM", "LOW", "INFO"], default="LOW")
+        p.add_argument("-v", "--verbose", action="store_true")
+        p.add_argument("--ignore-file")
+        p.add_argument("--min-severity", choices=["INFO", "LOW", "MEDIUM", "HIGH"])
+        p.set_defaults(fn=fn)
+        return p
+
+    p = intel("sbom", "list embedded libraries (CycloneDX SBOM) and optionally their known CVEs", cmd_sbom)
+    p.add_argument("--cves", action="store_true", help="look components up on OSV.dev (network)")
+    p.add_argument("--offline", action="store_true", help="with --cves: use the local cache only")
+    intel("endpoints", "inventory of hosts and API paths the app talks to", cmd_endpoints)
+    p = intel("links", "deep links, URL schemes, App Links / Universal Links", cmd_links)
+    p.add_argument("--check-network", action="store_true", help="fetch assetlinks.json / apple-app-site-association")
+    p = intel("cloud", "Firebase / S3 / GCS backends the app uses (opt-in exposure checks)", cmd_cloud)
+    p.add_argument("--check", action="store_true", help="read-only unauthenticated exposure checks (authorised targets only)")
     return ap
 
 

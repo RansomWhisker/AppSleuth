@@ -243,6 +243,24 @@ def regressions(old: Dict[str, Any], new: Dict[str, Any], p: Dict[str, Any], fd:
 
 # -------------------------------------------------------------------------- API
 
+def endpoint_diff(old_path: str, new_path: str) -> Dict[str, Any]:
+    """New and removed network hosts between two builds."""
+    from . import endpoints
+    try:
+        old_h, new_h = endpoints.host_set(old_path), endpoints.host_set(new_path)
+    except Exception as e:                       # never let this break the rest of the diff
+        return {"added": [], "removed": [], "regressions": [], "error": str(e)[:200]}
+    added = sorted(set(new_h) - set(old_h))
+    removed = sorted(set(old_h) - set(new_h))
+    regs = []
+    for h in added:
+        flags = new_h[h].get("flags") or []
+        risky = [f for f in flags if f in ("raw IP address", "cleartext scheme seen") or "non-prod" in f.lower()]
+        regs.append({"severity": "MEDIUM" if risky else "LOW",
+                     "text": f"New network host: {h}" + (f" ({', '.join(risky)})" if risky else "")})
+    return {"added": added, "removed": removed, "regressions": regs}
+
+
 def diff_builds(old_path: str, new_path: str, scan_fn: Callable[[str], Dict[str, Any]]) -> Dict[str, Any]:
     old_res, new_res = scan_fn(old_path), scan_fn(new_path)
     old_s, new_s = info_mod.summarize(old_res, old_path), info_mod.summarize(new_res, new_path)
@@ -266,6 +284,8 @@ def diff_builds(old_path: str, new_path: str, scan_fn: Callable[[str], Dict[str,
     out["posture"] = posture_diff(old_s, new_s)
     out["findings"] = finding_diff(old_res.get("findings", []), new_res.get("findings", []))
     out["regressions"] = regressions(old_s, new_s, out["posture"], out["findings"])
+    out["endpoints"] = endpoint_diff(old_path, new_path)
+    out["regressions"].extend(out["endpoints"]["regressions"])
     return out
 
 
@@ -304,6 +324,7 @@ def render_markdown(d: Dict[str, Any]) -> str:
     sect("URL schemes", p["url_schemes"])
     sect("Associated domains", p["associated_domains"])
     sect("Libraries / frameworks", p["libraries"])
+    sect("Network hosts", d.get("endpoints", {}))
     sect("Web-layer hosts", p["hybrid_hosts"])
     sect("Hybrid plugins", p["hybrid_plugins"])
     sect("Third-party libraries (SBOM)", {"added": p["sbom"]["added"], "removed": p["sbom"]["removed"]})
