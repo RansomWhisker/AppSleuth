@@ -3314,6 +3314,21 @@ def finding_fingerprint(f: Dict[str, Any]) -> str:
     return hashlib.sha256(basis.encode('utf-8', errors='replace')).hexdigest()[:16]
 
 
+def _app_name(result: Dict[str, Any]) -> str:
+    return os.path.basename(str(result.get("input_file") or result.get("meta", {}).get("file") or ""))
+
+
+def baseline_fingerprint(f: Dict[str, Any], app_name: str) -> str:
+    """Like finding_fingerprint, but the scanned file's own name is replaced in the location
+    ("MyApp-1.2.apk:dex (classes.dex)" -> "<app>:dex (classes.dex)"), so a baseline keeps
+    matching after the app file is renamed or a new build is downloaded under another name."""
+    loc = str(f.get("location") or "")
+    if app_name:
+        loc = re.sub(r"(?<![\w.-])" + re.escape(app_name) + r"(?![\w.-])", "<app>", loc)
+    basis = f"{f.get('title', '')}|{loc}"
+    return hashlib.sha256(basis.encode('utf-8', errors='replace')).hexdigest()[:16]
+
+
 def load_baseline(path: str) -> Dict[str, Any]:
     with open(path) as fh:
         data = json.load(fh)
@@ -3327,10 +3342,11 @@ def load_baseline(path: str) -> Dict[str, Any]:
 def apply_baseline(result: Dict[str, Any], baseline: Dict[str, Any], baseline_path: str) -> Dict[str, Any]:
     all_findings = result["findings"]
     new_findings, suppressed = [], []
+    name = _app_name(result)
     for f in all_findings:
-        fp = finding_fingerprint(f)
+        fp = baseline_fingerprint(f, name)
         f["fingerprint"] = fp
-        if fp in baseline:
+        if fp in baseline or finding_fingerprint(f) in baseline:     # also match baselines from <= 1.5.2
             suppressed.append(f)
         else:
             new_findings.append(f)
@@ -3345,8 +3361,9 @@ def apply_baseline(result: Dict[str, Any], baseline: Dict[str, Any], baseline_pa
 
 def write_baseline(result: Dict[str, Any], path: str):
     baseline = {}
+    name = _app_name(result)
     for f in result["findings"]:
-        fp = f.get("fingerprint") or finding_fingerprint(f)
+        fp = baseline_fingerprint(f, name)
         baseline[fp] = {"title": f["title"], "location": f.get("location")}
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(baseline, fh, indent=2)

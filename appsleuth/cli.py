@@ -136,10 +136,13 @@ def cmd_scan(a):
     outdir = a.outdir or f"scan_{os.path.splitext(os.path.basename(a.target.rstrip('/')))[0]}"
     if os.path.isdir(a.target):
         b = engine.batch_scan(a.target, outdir, recursive=a.recursive, save_extracted=a.keep_extracted)
-        print(f"Scanned {b['count']} file(s) under {a.target}; summary in {outdir}/batch_summary.md")
+        log = sys.stderr if a.format == "json" else sys.stdout      # --format json: stdout is pure JSON
+        if a.format == "json":
+            print(json.dumps(b, indent=2, default=str))
+        print(f"Scanned {b['count']} file(s) under {a.target}; summary in {outdir}/batch_summary.md", file=log)
         for r in b["results"]:
             if r["error"]:
-                print(f"  ! {r['file']}: {r['error']}")
+                print(f"  ! {r['file']}: {r['error']}", file=log)
         return
 
     rules = _rules(a, a.target)
@@ -156,7 +159,7 @@ def cmd_scan(a):
             die(f"could not read baseline '{a.baseline}': {e}", 2)
     if a.write_baseline:
         engine.write_baseline(result, a.write_baseline)
-        print(f"Baseline written to {a.write_baseline}")
+        print(f"Baseline written to {a.write_baseline}", file=sys.stderr if a.format == "json" else sys.stdout)
 
     write_reports(result, outdir)
     if result.get("warnings") and a.format != "json":
@@ -171,8 +174,10 @@ def cmd_scan(a):
         print(Term.c(f"{ident} {ver}", "bold") + f"  [{result['detected_type'].upper()}]")
         print_findings(result, verbose=a.verbose, show=a.show)
         print()
-    print(_counts(result["summary"]) + (f"   ({result['suppressed_count']} hidden)" if result.get("suppressed_count") else ""))
-    print(f"Reports: {outdir}/report.html  report.md  report.json")
+    log = sys.stderr if a.format == "json" else sys.stdout          # --format json: stdout is pure JSON
+    print(_counts(result["summary"]) + (f"   ({result['suppressed_count']} hidden)" if result.get("suppressed_count") else ""),
+          file=log)
+    print(f"Reports: {outdir}/report.html  report.md  report.json", file=log)
 
     if a.fail_on:
         worst = max((_SEV_RANK[f["severity"]] for f in result["findings"]), default=-1)
@@ -568,7 +573,8 @@ def main(argv: Optional[List[str]] = None):
         print(f"appsleuth {__version__}")
         return
     banner.show("AppSleuth", __version__, "https://github.com/RansomWhisker/AppSleuth",
-                "mobile app security analysis", suppress=hide)
+                "mobile app security analysis", suppress=hide,
+                website="https://rudranetra.com/tools/appsleuth/")
     if argv and argv[0] not in COMMANDS and not argv[0].startswith("-"):
         argv.insert(0, "scan")                      # `appsleuth app.apk` == `appsleuth scan app.apk`
     ap = build_parser()

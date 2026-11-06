@@ -64,7 +64,7 @@ def _show(name: str, version: str, github: str, tagline: str, *, suppress: bool 
     lines = [
         c(name, "1") + c(f"  v{version}", "1;36") + c("  ·  " + tagline, "2"),
         c("GitHub      ", "2") + c(github, "36"),
-        c("Rudranetra  ", "2") + c(website, "36"),
+        c("Website     ", "2") + c(website, "36"),
         c("Authorised testing only: use it on apps and devices you own or have permission to test.", "2;33"),
     ]
     out.write("\n")
