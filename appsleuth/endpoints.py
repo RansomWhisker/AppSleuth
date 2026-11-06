@@ -14,6 +14,7 @@ from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from . import appfiles, engine
+from .style import Term, bad, dim, good, head, warn
 
 MAX_FILE = 200 << 20
 URL_RE = re.compile(rb"(?i)\b(https?|wss?)://([A-Za-z0-9._~%\-]+(?:\.[A-Za-z0-9._~%\-]+)*|\[[0-9A-Fa-f:]+\])"
@@ -250,11 +251,13 @@ def run(path: str) -> Dict[str, Any]:
 
 def render_text(result: Dict[str, Any], limit: int = 60) -> str:
     inv = result["meta"]
-    L = [f"{result['meta'].get('package') or ''}  endpoints", "=" * 60]
+    L = [Term.c(f"{result['meta'].get('package') or ''}  endpoints", "id"), dim("=" * 60)]
     rows = inv["hosts"]
-    L.append(f"{'HOST':45} {'PARTY':12} {'CATEGORY':16} N  FLAGS")
+    L.append(head(f"{'HOST':45} {'PARTY':12} {'CATEGORY':16} N  FLAGS"))
     for r in rows[:limit]:
-        L.append(f"{r['host'][:44]:45} {r['party']:12} {r['category']:16} {r['count']:<3}{'; '.join(r['flags'])}")
+        party = (good if r["party"] == "first-party" else dim)(f"{r['party']:12}")
+        flags = "; ".join(r["flags"])
+        L.append(f"{r['host'][:44]:45} {party} {r['category']:16} {r['count']:<3}{(bad if flags else dim)(flags)}")
     if len(rows) > limit:
         L.append(f"... {len(rows) - limit} more (use --full or the JSON/HTML report)")
     if inv["paths"]:

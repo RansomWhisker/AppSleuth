@@ -5,6 +5,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 from . import engine
+from .style import Term, bad, dim, good, head, warn
 
 # Boolean "posture" flags, derived from findings so that scan, info and diff all agree.
 FLAG_TITLES = {
@@ -122,38 +123,38 @@ def summarize(result: Dict[str, Any], path: Optional[str] = None) -> Dict[str, A
 # ------------------------------------------------------------------ rendering
 
 def _yn(v: Any, yes: str, no: str):
-    return None if v is None else (yes if v else no)
+    return None if v is None else (good(yes) if v else bad(no))
 
 
 def _enc_plain(verdicts: List[str]) -> str:
     if "ciphertext" in verdicts:
-        return "FairPlay-encrypted: the code is NOT readable here (scan coverage limited)"
+        return bad("FairPlay-encrypted: the code is NOT readable here (scan coverage limited)")
     if "flag-set-but-readable" in verdicts:
-        return "FairPlay flag set but code is readable (decrypted dump)"
+        return warn("FairPlay flag set but code is readable (decrypted dump)")
     if "decrypted" in verdicts:
-        return "not encrypted: code is readable (FairPlay removed, e.g. a decrypted dump)"
+        return good("not encrypted") + dim(": code is readable (FairPlay removed, e.g. a decrypted dump)")
     return "unknown"
 
 
 def ats_lines(ats: Dict[str, Any]) -> List[str]:
     """ATS settings with their values; the key alone says nothing (NSAllowsArbitraryLoads can be false)."""
     if not ats:
-        return ["  ENFORCED (no ATS overrides; HTTPS with modern TLS required)"]
+        return ["  " + good("ENFORCED") + dim(" (no ATS overrides; HTTPS with modern TLS required)")]
     off = bool(ats.get("NSAllowsArbitraryLoads"))
     web = bool(ats.get("NSAllowsArbitraryLoadsInWebContent"))
     if off:
-        verdict = "DISABLED globally (NSAllowsArbitraryLoads = true)"
+        verdict = bad("DISABLED globally (NSAllowsArbitraryLoads = true)")
     elif web:
-        verdict = "ENFORCED for the app, but disabled for web content"
+        verdict = warn("ENFORCED for the app, but disabled for web content")
     else:
-        verdict = "ENFORCED" + (" (with exceptions)" if ats.get("NSExceptionDomains") else "")
-    out = [f"  Status            {verdict}"]
+        verdict = (warn("ENFORCED (with exceptions)") if ats.get("NSExceptionDomains") else good("ENFORCED"))
+    out = ["  " + dim("Status".ljust(18)) + verdict]
     for k in sorted(ats):
         v = ats[k]
         if k == "NSExceptionDomains" and isinstance(v, dict):
             for dom, rules in sorted(v.items()):
-                bad = isinstance(rules, dict) and rules.get("NSExceptionAllowsInsecureHTTPLoads")
-                out.append(f"  Exception         {dom}" + ("  (plaintext HTTP allowed)" if bad else ""))
+                insecure = isinstance(rules, dict) and rules.get("NSExceptionAllowsInsecureHTTPLoads")
+                out.append("  " + dim("Exception".ljust(18)) + str(dom) + (bad("  (plaintext HTTP allowed)") if insecure else ""))
         else:
             out.append(f"  {k}: {v}")
     return out
@@ -162,7 +163,92 @@ def ats_lines(ats: Dict[str, Any]) -> List[str]:
 def _kv(lines: List[str], label: str, value: Any):
     if value in (None, "", [], {}):
         return
-    lines.append(f"  {label:<18}{value}")
+    lines.append(f"  {dim(f'{label:<18}')}{value}")
+
+
+_LEVEL_STYLE = {"detected": good, "likely": warn, "weak signal": warn, "SDK only": warn}
+
+
+def _level(cat: str, level: str) -> str:
+    if level == "not found":
+        return dim(level) if cat in ("obfuscation", "rasp") else bad(level)
+    return _LEVEL_STYLE.get(level, str)(level)
+
+
+def protection_lines(s: Dict[str, Any], *, full: bool = False) -> List[str]:
+    """Static detection of client-side protections, per-binary hardening and (if present) Capacitor SQL encryption."""
+    P = s.get("protections")
+    if not P:
+        return (["", head("Protections"), "  " + dim(f"(not available: {s['protections_error']})")]
+                if s.get("protections_error") else [])
+    L: List[str] = ["", head("Protections found in the app (static)")]
+    for cat, c in P["categories"].items():
+        ev = ", ".join(c["evidence"][: (8 if full else 3)])
+        extra = ""
+        if c.get("sdk_evidence") and c["level"] != "SDK only":
+            extra = dim(f"   (+ in third-party SDKs: {', '.join(c['sdk_evidence'][:2])})")
+        lv = _level(cat, c["level"])
+        pad = " " * max(1, 13 - len(c["level"]))
+        L.append(f"  {dim(c['label'].ljust(38))}{lv}{pad}{dim(ev) if c['level'] == 'SDK only' else ev}{extra}")
+    cap = P.get("capacitor") or {}
+    if cap.get("privacy_screen_enabled") is not None:
+        L.append("  " + dim(f"{'Capacitor PrivacyScreen':<38}") + (good("enabled") if cap["privacy_screen_enabled"] else bad("disabled")))
+    L.append("  " + dim("Static indicators only: 'detected' means the code/SDK is present, not that it is effective or "
+                         "unbypassable. 'not found' can also mean the app is packed or obfuscated."))
+    if P.get("packed"):
+        L.append("  " + bad("App looks packed / shielded: static results above are incomplete."))
+
+    sq = P.get("capacitor_sql") or {}
+    if sq:
+        L.append("")
+        L.append(head("Capacitor SQLite database encryption"))
+        st = sq["status"]
+        _kv(L, "Encryption", {"on": good("ON"), "off": bad("OFF"), "unclear": warn("unclear")}[st]
+            + (dim(f"  ({sq['config_key']} = {str(sq['config_flag']).lower()})") if sq.get("config_key") else ""))
+        _kv(L, "Connection modes", ", ".join(sq.get("modes") or []))
+        if sq.get("sqlcipher"):
+            _kv(L, "SQLCipher", good("bundled") + dim("  " + ", ".join(x.rsplit("/", 1)[-1] for x in sq["sqlcipher"])) +
+                (warn("  (bundled, but encryption is off)") if st == "off" else ""))
+        elif st == "on":
+            _kv(L, "SQLCipher", warn("not found in the package"))
+        if sq.get("hard_coded_secret"):
+            _kv(L, "Passphrase", bad("a literal passphrase is passed to setEncryptionSecret() in the web code"))
+        if sq.get("plain_bundled_dbs"):
+            _kv(L, "Bundled databases", bad("plain SQLite (unencrypted): ") + ", ".join(sq["plain_bundled_dbs"]))
+        if sq.get("biometric"):
+            _kv(L, "Biometric unlock", good("configured"))
+
+    b = P.get("binaries") or {}
+    if b.get("total"):
+        L.append("")
+        L.append(head(f"Binary protection ({b['total']} binaries checked)"))
+        weak = b.get("weak") or []
+        rows = b["rows"]
+        if s["platform"] == "ios":
+            mains = [r for r in rows if r.get("main")]
+            if mains:
+                m = mains[0]
+                _kv(L, "Main binary", f"PIE {_yn(m.get('pie'), 'yes', 'NO')}   canary {_yn(m.get('canary'), 'yes', 'no')}"
+                    + ("   " + bad("exec stack") if m.get("exec_stack") else "")
+                    + ("   " + bad("FairPlay-encrypted") if m.get("encrypted") else ""))
+            pie_bad = sum(1 for r in rows if r.get("main") and r.get("pie") is False)
+            can_bad = [r for r in rows if r.get("canary") is False and not r.get("swift")]
+            _kv(L, "Stack canary", (good("all") if not can_bad else warn(f"missing in {len(can_bad)} of {len(rows)}")) + dim("  (heuristic; Swift code is excluded)"))
+            _kv(L, "Executable stack", bad(f"{sum(1 for r in rows if r.get('exec_stack'))} binaries") if any(r.get("exec_stack") for r in rows) else good("none"))
+            enc = [r for r in rows if r.get("encrypted")]
+            _kv(L, "Still encrypted", warn(", ".join(r["name"].rsplit("/", 1)[-1] for r in enc[:5])) if enc else good("none"))
+        else:
+            _kv(L, "No RELRO", bad(str(sum(1 for r in rows if r.get("relro") == "none"))) if any(r.get("relro") == "none" for r in rows) else good("none"))
+            _kv(L, "Executable stack", bad(str(sum(1 for r in rows if r.get("nx") is False))) if any(r.get("nx") is False for r in rows) else good("none"))
+            can = sum(1 for r in rows if r.get("canary") is False)
+            _kv(L, "Stack canary", good("all") if not can else warn(f"missing in {can} of {len(rows)}"))
+        if weak:
+            L.append("  " + dim("Binaries with issues:"))
+            for r in weak[: (len(weak) if full else 6)]:
+                L.append(f"    {r['name'].rsplit('/', 2)[-1] if not full else r['name']}  " + warn(", ".join(r["issues"])))
+            if not full and len(weak) > 6:
+                L.append("    " + dim(f"... {len(weak) - 6} more (use --full)"))
+    return L
 
 
 def coverage_warnings(result: Dict[str, Any]) -> List[str]:
@@ -186,7 +272,7 @@ def coverage_warnings(result: Dict[str, Any]) -> List[str]:
 def render_text(s: Dict[str, Any], *, full: bool = False) -> str:
     L: List[str] = []
     for w in s.get("warnings") or []:
-        L.append(f"!! WARNING: {w}")
+        L.append(bad(f"!! WARNING: {w}"))
     if s.get("warnings"):
         L.append("")
     title = s.get("name") or s.get("id") or "?"
@@ -223,22 +309,15 @@ def render_text(s: Dict[str, Any], *, full: bool = False) -> str:
         for subj in sg.get("subjects") or []:
             _kv(L, "Subject", subj)
 
-    if s["platform"] == "ios":
-        hd = s.get("hardening") or {}
-        if hd:
-            L.append("")
-            L.append("Binary protection")
-            _kv(L, "PIE (ASLR)", _yn(hd.get("pie"), "yes", "NO - fixed load address"))
-            _kv(L, "Stack canary", _yn(hd.get("stack_canary_symbol"), "yes", "not found (heuristic)"))
-            _kv(L, "Exec. stack", "ALLOWED" if hd.get("allow_stack_execution") else "no")
-
     L.append("")
     L.append("Posture")
     for flag, on in sorted(s.get("flags", {}).items()):
         if on:
-            L.append(f"  ! {flag.replace('_', ' ')}")
+            L.append("  " + bad("! " + flag.replace("_", " ")))
     if not any(s.get("flags", {}).values()):
-        L.append("  (no risky flags)")
+        L.append("  " + good("(no risky flags)"))
+
+    L.extend(protection_lines(s, full=full))
 
     perms = s.get("permissions") or []
     L.append("")
@@ -251,7 +330,7 @@ def render_text(s: Dict[str, Any], *, full: bool = False) -> str:
         dang = set(s.get("dangerous_permissions") or [])
         L.append(f"Permissions ({len(perms)}, {len(dang)} dangerous)")
         for p in perms[: (len(perms) if full else 15)]:
-            L.append(f"  {'!' if p in dang else ' '} {p}")
+            L.append(f"  {warn('!') if p in dang else ' '} {warn(p) if p in dang else p}")
     if not full and len(perms) > 15:
         L.append(f"  … {len(perms) - 15} more (use --full)")
 
@@ -301,5 +380,18 @@ def render_text(s: Dict[str, Any], *, full: bool = False) -> str:
     c = s.get("counts") or {}
     if c:
         L.append("")
-        L.append(f"Scan: {c.get('HIGH', 0)} High, {c.get('MEDIUM', 0)} Medium, {c.get('LOW', 0)} Low, {c.get('INFO', 0)} Info")
-    return "\n".join(L)
+        L.append("Scan: " + "  ".join(Term.c(f"{c.get(k, 0)} {k.title()}", k) for k in ("HIGH", "MEDIUM", "LOW", "INFO")))
+    out = []
+    title_done = False
+    for ln in L:
+        plain = ln.lstrip()
+        if (not title_done) and ln and not ln.startswith((" ", "\x1b", "!")):
+            out.append(Term.c(ln, "id"))
+            title_done = True
+        elif ln and not ln.startswith((" ", "=", "\x1b", "!", "Scan:")):
+            out.append(head(ln))
+        elif ln.startswith("="):
+            out.append(dim(ln))
+        else:
+            out.append(ln)
+    return "\n".join(out)

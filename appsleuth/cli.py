@@ -17,21 +17,14 @@ import tempfile
 from typing import Any, Dict, List, Optional
 
 from . import __version__, diff as diff_mod, engine, info as info_mod, triage
+from .style import Term
+from . import banner
 
 COMMANDS = ("scan", "info", "diff", "data", "runtime", "sbom", "endpoints", "links", "cloud", "version")
 _SEV_RANK = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3}
 
 
 # ------------------------------------------------------------------ terminal
-
-class Term:
-    on = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
-    codes = {"HIGH": "1;31", "MEDIUM": "33", "LOW": "34", "INFO": "90", "bold": "1", "dim": "2", "ok": "32"}
-
-    @classmethod
-    def c(cls, text: str, kind: str) -> str:
-        return f"\033[{cls.codes[kind]}m{text}\033[0m" if cls.on else text
-
 
 def die(msg: str, code: int = 1):
     print(f"error: {msg}", file=sys.stderr)
@@ -199,6 +192,11 @@ def cmd_info(a):
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     s = info_mod.summarize(res, a.target)
+    try:
+        from . import protections
+        s["protections"] = protections.detect_path(a.target)
+    except Exception as e:                      # never let the extra check break `info`
+        s["protections_error"] = f"{type(e).__name__}: {e}"
     if a.json:
         print(json.dumps(s, indent=2, default=str))
     else:
@@ -555,9 +553,12 @@ def main(argv: Optional[List[str]] = None):
         except (AttributeError, ValueError):
             pass
     argv = list(sys.argv[1:] if argv is None else argv)
+    hide = banner.strip_flag(argv)
     if argv and argv[0] == "version":
         print(f"appsleuth {__version__}")
         return
+    banner.show("AppSleuth", __version__, "https://github.com/RansomWhisker/AppSleuth",
+                "mobile app security analysis", suppress=hide)
     if argv and argv[0] not in COMMANDS and not argv[0].startswith("-"):
         argv.insert(0, "scan")                      # `appsleuth app.apk` == `appsleuth scan app.apk`
     ap = build_parser()
