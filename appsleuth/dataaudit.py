@@ -57,6 +57,16 @@ def sensitive_key(key: str) -> Optional[str]:
     return None
 
 
+_AUTH_WORDS = ("token", "auth", "login", "access", "refresh", "jwt", "cookie", "secret", "password", "bearer")
+
+
+def is_session_id_key(key: str) -> bool:
+    """`session_id`-style keys written by analytics SDKs (Umeng, Facebook, Clarity...). Not credentials
+    unless the name also says token/auth/login."""
+    norm = "".join(_words(str(key)))
+    return "sessionid" in norm and not any(w in norm for w in _AUTH_WORDS)
+
+
 def classify_value(v: Any) -> Tuple[str, bool]:
     """-> (description, strong). 'strong' means it looks like real credential material."""
     if isinstance(v, (bool, int, float)) or v is None:
@@ -295,7 +305,7 @@ def audit_dir(root: str, platform: str = "ios", *, reveal: bool = True,
                     if cat:
                         desc, strong = classify_value(v)
                         if desc not in ("scalar", "empty", "bcrypt hash"):
-                            cred_files.setdefault(rel, []).append((f"{k} = {desc} ({redact(v, reveal)})", cat, 2 if strong else 1))
+                            cred_files.setdefault(rel, []).append((f"{k} = {desc} ({redact(v, reveal)})", cat, 2 if strong and not is_session_id_key(k) else 1))
             elif low.endswith(".xml") and "shared_prefs" in low:
                 types["shared_prefs"] += 1
                 for k, v in _shared_prefs_items(_read(full)):
@@ -303,7 +313,7 @@ def audit_dir(root: str, platform: str = "ios", *, reveal: bool = True,
                     if cat:
                         desc, strong = classify_value(v)
                         if desc not in ("scalar", "empty", "bcrypt hash"):
-                            cred_files.setdefault(rel, []).append((f"{k} = {desc} ({redact(v, reveal)})", cat, 2 if strong else 1))
+                            cred_files.setdefault(rel, []).append((f"{k} = {desc} ({redact(v, reveal)})", cat, 2 if strong and not is_session_id_key(k) else 1))
             elif ext in (".db", ".sqlite", ".sqlite3", ".db3", ".sql", ".localstorage") or "cache.db" in low:
                 types["sqlite"] += 1
                 _audit_sqlite(full, rel, add, reveal, meta)
@@ -316,7 +326,7 @@ def audit_dir(root: str, platform: str = "ios", *, reveal: bool = True,
                     if cat:
                         desc, strong = classify_value(v)
                         if desc not in ("scalar", "empty", "bcrypt hash"):
-                            cred_files.setdefault(rel, []).append((f"{k} = {desc} ({redact(v, reveal)})", cat, 2 if strong else 1))
+                            cred_files.setdefault(rel, []).append((f"{k} = {desc} ({redact(v, reveal)})", cat, 2 if strong and not is_session_id_key(k) else 1))
         except Exception:
             pass
 

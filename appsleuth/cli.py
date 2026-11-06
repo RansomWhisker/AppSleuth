@@ -315,7 +315,10 @@ def cmd_runtime(a):
     except RuntimeError as e:
         die(str(e), 2)
     except Exception as e:      # frida raises its own error types
-        die(f"runtime probe failed: {type(e).__name__}: {e}", 1)
+        hint = ""
+        if type(e).__name__ == "TimedOutError":
+            hint = " (the app did not start under Frida; launch it by hand and run again without --spawn)"
+        die(f"runtime probe failed: {type(e).__name__}: {e}{hint}", 1)
     res = runtime.events_to_result(events, platform, a.target)
     res = triage.apply(res, rules=_rules(a, a.target), min_severity=a.min_severity, corroborate=False)
     out = a.outdir or f"runtime_{a.target}"

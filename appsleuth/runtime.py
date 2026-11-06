@@ -74,7 +74,9 @@ def events_to_result(events: Iterable[Dict[str, Any]], platform: str, target: st
     # crypto in use
     ciphers = Counter(e.get("alg", "") for e in by.get("cipher", []))
     weak = sorted(a for a in ciphers if _WEAK_CIPHER.search(a))
-    ecb = sorted(a for a in ciphers if re.search(r"(?i)/ECB/", a) or a.strip().upper() in ("AES", "AES/ECB"))
+    # "RSA/ECB/PKCS1Padding" is just the JCA name for textbook RSA, not a block-cipher mode problem
+    ecb = sorted(a for a in ciphers if not a.strip().upper().startswith("RSA")
+                 and (re.search(r"(?i)/ECB/", a) or a.strip().upper() in ("AES", "AES/ECB")))
     if weak:
         add("MEDIUM", "Weak cipher used at runtime", "A legacy cipher was requested while the app ran.",
             evidence=", ".join(weak[:6]))
@@ -98,12 +100,16 @@ def events_to_result(events: Iterable[Dict[str, Any]], platform: str, target: st
         if desc in ("empty", "scalar", "short string"):
             continue
         sev = "HIGH" if strong else "MEDIUM"
+        if dataaudit.is_session_id_key(key):          # analytics/SDK session ids, not login credentials
+            sev, kind_ = "LOW", "session identifier"
         if key not in bad or sev == "HIGH":
             bad[key] = (sev, kind_, desc)
     for key, (sev, kind_, desc) in sorted(bad.items()):
         store = "SharedPreferences" if platform == "android" else "NSUserDefaults"
         add(sev, f"Credential-like value written to {store} in plaintext",
-            f"Key `{key}` ({kind_}, {desc}) is stored unencrypted. Use the Keystore/Keychain instead.",
+            f"Key `{key}` ({kind_}, {desc}) is stored unencrypted. Use the Keystore/Keychain instead."
+            + (" Session ids written by analytics SDKs are usually harmless; check whether it authenticates the user."
+               if kind_ == "session identifier" else ""),
             evidence=f"{key}: {desc}", conf="confirmed" if sev == "HIGH" else "heuristic")
 
     # secrets in logs
@@ -198,6 +204,10 @@ def run_probe(platform: str, target: str, *, seconds: int = 60, spawn: bool = Fa
         script = session.create_script(source)
         script.on("message", on_message)
         script.load()
+        if platform == "android":          # the Android agent installs its hooks when it gets this
+            skip = [x for x in os.environ.get("APPSLEUTH_SKIP_HOOKS", "").split(",") if x]
+            script.post({"type": "config", "skip": skip,
+                         "delay_ms": int(os.environ.get("APPSLEUTH_HOOK_DELAY_MS", "0") or 0)})
         if not resume_first and spawn:
             dev.resume(pid)
         return session, script

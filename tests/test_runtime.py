@@ -65,3 +65,17 @@ class RuntimeFindings(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RuntimeFalsePositives(unittest.TestCase):
+    def test_rsa_is_not_ecb_but_aes_default_is(self):
+        r = runtime.events_to_result([{"t": "cipher", "alg": "RSA/ECB/PKCS1Padding"}], "android", "x")
+        self.assertFalse([f for f in r["findings"] if "ECB" in f["title"]])
+        r = runtime.events_to_result([{"t": "cipher", "alg": "AES"}], "android", "x")
+        self.assertTrue([f for f in r["findings"] if "ECB" in f["title"]])
+
+    def test_analytics_session_id_is_low_not_high(self):
+        ev = [{"t": "prefs_write", "key": "session_id", "value": "0123456789abcdef0123456789abcdef"},
+              {"t": "prefs_write", "key": "authToken", "value": "0123456789abcdef0123456789abcdef"}]
+        sev = {f["evidence"].split(":")[0]: f["severity"] for f in runtime.events_to_result(ev, "android", "x")["findings"]}
+        self.assertEqual(sev, {"session_id": "LOW", "authToken": "HIGH"})
