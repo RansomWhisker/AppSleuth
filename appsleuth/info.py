@@ -138,7 +138,10 @@ def coverage_warnings(result: Dict[str, Any]) -> List[str]:
                    "so this result is incomplete. Re-dump the app decrypted (e.g. getipa --decrypted) and scan again.")
     bad = meta.get("embedded_binaries_still_encrypted") or []
     if bad:
-        out.append("Still-encrypted embedded binaries were not scanned: " + ", ".join(bad[:6]) + (" ..." if len(bad) > 6 else ""))
+        only_ext = all(b.endswith(".appex") for b in bad)
+        out.append(("App extension(s) still encrypted and not scanned (usually minor): " if only_ext
+                    else "Still-encrypted embedded binaries were not scanned: ")
+                   + ", ".join(bad[:6]) + (" ..." if len(bad) > 6 else ""))
     return out
 
 

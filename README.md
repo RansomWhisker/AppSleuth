@@ -37,10 +37,11 @@ Reports (`report.json/md/html`) are written to `-o DIR`.
 Observe what a running app really does, using Frida: root/jailbreak checks, plaintext HTTP actually requested, ciphers (ECB, DES), credentials written to SharedPreferences/NSUserDefaults, secrets in logs, debuggable WebViews.
 
     pip install "appsleuth[runtime]"          # adds Frida; frida-server must run on the device
+    # (agent sources: appsleuth/runtime_js/agents; rebuild with `npm install && npm run build` there)
     appsleuth runtime --android com.example.app --seconds 90
     appsleuth runtime --ios com.example.app --spawn
 
-It is **observe-only** (no bypasses, nothing patched) and never stores values, only key names and descriptions. Use the app during the window: it can only report what it sees. **Status: new, and so far tested only on simulated events, not on a real device.** Treat results as leads.
+It is **observe-only** (no bypasses, nothing patched) and never stores values, only key names and descriptions. Use the app during the window: it can only report what it sees. **Status:** iOS has been tested on a real jailbroken device (Dopamine, Frida 17) against two apps; Android has been built the same way but **not yet tested on a device**. The `pip` Frida version must match the `frida-server` on the phone. Only calls made while the probe runs are visible, and results are leads, not proof. Probes count only calls from the app's own code, not from the jailbreak's tweak loader.
 
 ## Keeping false positives low
 

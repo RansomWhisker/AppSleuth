@@ -121,12 +121,14 @@ def events_to_result(events: Iterable[Dict[str, Any]], platform: str, target: st
             "setWebContentsDebuggingEnabled(true) was called; pages can be inspected over USB and may leak data.")
 
     if by.get("keychain_add"):
-        weakacc = sorted({e.get("accessible", "") for e in by["keychain_add"]
-                          if re.search(r"(?i)(kSecAttrAccessibleAlways|dk$|\bdk\b|ck$)", e.get("accessible", ""))})
-        if weakacc:
+        # pdmn codes: ak=WhenUnlocked, ck=AfterFirstUnlock, dk=Always (deprecated), *u = ThisDeviceOnly
+        accs = {e.get("accessible", "") for e in by["keychain_add"]}
+        weak = sorted(a for a in accs if re.fullmatch(r"(?i)dku?", a) or "kSecAttrAccessibleAlways" in a)
+        if weak:
             add("MEDIUM", "Keychain item stored with weak accessibility",
-                "The item can be read while the device is locked or without a device passcode.",
-                evidence=", ".join(weakacc), conf="heuristic")
+                "kSecAttrAccessibleAlways can be read while the device is locked (and is deprecated). "
+                "Use WhenUnlocked, or AfterFirstUnlock only if background access is required.",
+                evidence=", ".join(weak), conf="heuristic")
 
     summary = {s: sum(1 for f in findings if f["severity"] == s) for s in ("HIGH", "MEDIUM", "LOW", "INFO")}
     return {

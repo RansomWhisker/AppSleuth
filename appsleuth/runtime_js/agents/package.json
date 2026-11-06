@@ -1,0 +1,13 @@
+{
+  "name": "appsleuth-runtime-agents",
+  "private": true,
+  "description": "Build step for the Frida agents (Frida 17 no longer bundles the ObjC/Java bridges). Run: npm install && npm run build",
+  "scripts": {
+    "build": "frida-compile src/ios.js -o ../ios.js -c && frida-compile src/android.js -o ../android.js -c"
+  },
+  "devDependencies": {
+    "frida-compile": "19.1.0",
+    "frida-java-bridge": "7.0.13",
+    "frida-objc-bridge": "8.0.6"
+  }
+}

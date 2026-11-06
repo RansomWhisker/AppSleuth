@@ -856,6 +856,10 @@ def _is_noise_cleartext_url(url: bytes) -> bool:
         return False
     rest = text[len("http://"):]
     host = rest.split("/", 1)[0].split(":", 1)[0]
+    # not a hostname at all (format strings like "http://%@", "http://{host}"), or a reserved
+    # TLD that can never be a real endpoint (RFC 2606 / 6761)
+    if not re.fullmatch(r"[a-z0-9]([a-z0-9.-]*[a-z0-9])?", host) or host.endswith((".invalid", ".example", ".test")):
+        return True
     if host in _NOISE_URL_EXACT_HOSTS or host.startswith(_NOISE_URL_HOST_PREFIXES):
         return True
     if host.endswith(("apple.com",)) and any(
@@ -921,7 +925,7 @@ def _classify_secret(name: str, token: bytes, blob: bytes, pos: int):
         body = re.sub(rb'(\\n|\\r|\s)', b'', body)
         if re.fullmatch(rb'[A-Za-z0-9+/=]{100,}', body or b"-"):
             return ("HIGH", "Embedded private key material", "", "heuristic")
-        return ("LOW", "PEM private-key marker string (no key body)",
+        return ("INFO", "PEM private-key marker string (no key body)",
                 " Only the '-----BEGIN ... PRIVATE KEY-----' marker was found, with no base64 key data "
                 "after it. This is the normal signature of a crypto/TLS library that parses PEM files, "
                 "not a leaked key.", "heuristic")

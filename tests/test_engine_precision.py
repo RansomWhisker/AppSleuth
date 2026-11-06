@@ -42,7 +42,7 @@ class SecretClassification(unittest.TestCase):
         self.assertEqual(out[0][0], "HIGH")
 
     def test_pem_marker_without_body_is_low(self):
-        self.assertEqual(secrets(b"-----BEGIN RSA PRIVATE KEY-----")[0][0], "LOW")
+        self.assertEqual(secrets(b"-----BEGIN RSA PRIVATE KEY-----")[0][0], "INFO")
         body = base64.b64encode(b"k" * 300)
         self.assertEqual(secrets(b"-----BEGIN PRIVATE KEY-----\n" + body + b"\n-----END PRIVATE KEY-----")[0][0], "HIGH")
 
@@ -89,7 +89,8 @@ class EntropyFilter(unittest.TestCase):
 class CleartextNoise(unittest.TestCase):
     def test_noise(self):
         for u in (b"http://ocsp.apple.com/ocsp03", b"http://crl.apple.com/root.crl", b"http://www.w3.org/2000/svg",
-                  b"http://xmlpull.org/v1/doc/features.html", b"http://localhost/x", b"http://reactjs.org/docs"):
+                  b"http://xmlpull.org/v1/doc/features.html", b"http://localhost/x", b"http://reactjs.org/docs",
+                  b"http://%", b"http://%@/path", b"http://{host}/x", b"http://example.invalid"):
             self.assertTrue(engine._is_noise_cleartext_url(u), u)
 
     def test_real_endpoints_kept(self):

@@ -47,6 +47,12 @@ class RuntimeFindings(unittest.TestCase):
                        {"t": "pinning", "how": "okhttp3.CertificatePinner", "host": "api.example.com"}])
         self.assertTrue(all(sev == "INFO" for sev, _ in t) and len(t) == 2)
 
+    def test_keychain_accessibility(self):
+        self.assertEqual(titles([{"t": "keychain_add", "accessible": "ck"},
+                                 {"t": "keychain_add", "accessible": "ak"}])[0], [])
+        t, _ = titles([{"t": "keychain_add", "accessible": "dk"}])
+        self.assertEqual(t, [("MEDIUM", "Keychain item stored with weak accessibility")])
+
     def test_garbage_events_ignored(self):
         t, r = titles([None, "x", {"nope": 1}, {"t": 5}, {"t": "unknown"}])
         self.assertEqual(t, [])
