@@ -67,7 +67,7 @@ def unpacked(path: str) -> Iterator[App]:
         raise ValueError(f"file not found: {path}")
     kind = engine.detect_kind(path)
     if kind not in ("apk", "apks", "aab", "ipa"):
-        raise ValueError(f"Could not recognise '{path}' as an APK, APKS/XAPK, AAB or IPA file.")
+        raise ValueError(engine.unrecognised_message(path))
     work = tempfile.mkdtemp(prefix="appsleuth_")
     try:
         app = App(path, kind, work)

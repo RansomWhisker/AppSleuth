@@ -23,10 +23,33 @@ One tool for mobile app security triage. Works on macOS, Linux and Windows (devi
     pip install .          # or, from a clone: gives you the `appsleuth` command
     python3 -m appsleuth …   # or run in place
 
+## Tech stack (`info`)
+
+`info` shows what the app is built with: the cross-platform framework or engine (Flutter, React Native with Hermes or
+JavaScriptCore, Capacitor, Cordova, Xamarin / MAUI, Unity, Unreal, Godot, ...), languages (Kotlin, Java, Swift,
+Objective-C, Dart, C#, Rust, C/C++), UI toolkit, networking, storage, analytics, ads, push and payment SDKs, and the
+toolchain (Android Gradle Plugin, compileSdk, ABIs; Xcode, SDK, architectures) with a minification estimate. Versions
+come from package metadata when present; `--full` adds the evidence behind each entry and `--json` has it as `tech_stack`.
+
+## Where the protection checks live (`info --full`)
+
+`info --full` adds a "Where the checks are" section: for every root / jailbreak, Frida, hook, debugger, emulator,
+pinning, tamper, screen-capture and obfuscation indicator it lists the concrete locations, static and observe-only:
+
+- Java / Kotlin methods that use the indicator string, call a matching API or class, or are defined with a matching
+  name, in the app and in bundled libraries (third-party SDK code is tagged `[SDK]`).
+- Objective-C methods and classes read from the runtime metadata (the tables `objc_msgSend` dispatches through).
+- Native functions, exported or internal, with their virtual address: symbol-table matches, functions that reference
+  a matching string / CFString / selector (arm64 and x86-64), and call sites of `ptrace`, `sysctl`, `_dyld_*` imports.
+- Web bundles, plists and configs: file, line and offset.
+
+The text view shows up to 30 locations per indicator; `--json` carries every one. Functions in stripped binaries are
+named `sub_<address>`. FairPlay-encrypted binaries get no code cross-references (scan a decrypted dump).
+
 ## Examples
 
     appsleuth scan app.ipa --fail-on HIGH
-    appsleuth info RSWealth.apks --full
+    appsleuth info RSWealth.apks --full   # also lists every code location of each protection check
     appsleuth diff v1.apk v2.apk --fail-on-regression
     appsleuth data --ios --host 9 -b com.example.app
     appsleuth data --android -p com.example.app --method auto

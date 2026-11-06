@@ -100,3 +100,58 @@ class CleartextNoise(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResourceTableEncodings(unittest.TestCase):
+    """Sparse / 16-bit-offset type chunks and reference chains, as produced by modern aapt2."""
+
+    def _table(self):
+        from appsleuth import engine
+        t = engine.ResourceTable.__new__(engine.ResourceTable)
+        t.global_strings, t.entries, t.refs = ["Docs"], {}, {}
+        return t
+
+    def _chunk(self, flags, offsets_blob, count, value_type=0x12, value=1):
+        import struct
+        header = 28
+        entries_start = header + len(offsets_blob)
+        entry = struct.pack("<HHI", 8, 0, 0) + struct.pack("<HBBI", 8, 0, value_type, value)
+        head = struct.pack("<HHI", 0x0201, header, entries_start + len(entry)) + bytes([1, flags]) + b"\x00\x00" \
+            + struct.pack("<II", count, entries_start)
+        return head.ljust(header, b"\x00") + offsets_blob + entry
+
+    def test_sparse_entry_is_found(self):
+        import struct
+        t = self._table()
+        blob = struct.pack("<I", 5 | ((0 // 4) << 16))          # entry index 5, offset 0
+        t._parse_type_chunk(self._chunk(0x01, blob, 1), 0, 28, 0x7F, ["bool"], ["k"])
+        self.assertEqual(t.entries[0x7F010005], ("bool", "k", "true"))
+
+    def test_offset16_entry_is_found(self):
+        import struct
+        t = self._table()
+        blob = struct.pack("<HH", 0xFFFF, 0)                    # entry 0 absent, entry 1 at offset 0
+        t._parse_type_chunk(self._chunk(0x02, blob, 2), 0, 28, 0x7F, ["bool"], ["k"])
+        self.assertEqual(list(t.entries), [0x7F010001])
+
+    def test_reference_chain_resolves_to_string(self):
+        t = self._table()
+        t.entries = {0x7F120001: ("string", "app_name", None), 0x7F120002: ("string", "real", "F-Droid")}
+        t.refs = {0x7F120001: 0x7F120002}
+        self.assertEqual(t.resolve("@0x7f120001"), "F-Droid")
+
+
+class UnrecognisedFile(unittest.TestCase):
+    def test_truncated_zip_is_explained(self):
+        import os, tempfile
+        from appsleuth import engine
+        p = os.path.join(tempfile.mkdtemp(), "a.ipa")
+        open(p, "wb").write(b"PK\x03\x04" + b"\x00" * 100)
+        self.assertIn("truncated", engine.unrecognised_message(p))
+
+    def test_not_a_zip_is_explained(self):
+        import os, tempfile
+        from appsleuth import engine
+        p = os.path.join(tempfile.mkdtemp(), "a.ipa")
+        open(p, "wb").write(b"hello")
+        self.assertIn("not a zip", engine.unrecognised_message(p))

@@ -143,7 +143,7 @@ def ios_entitlement_lines(ents: Dict[str, Any], *, full: bool = False) -> List[s
 
 def android_permission_lines(perms: List[str], dangerous: List[str], *, full: bool = False) -> List[str]:
     dang = set(dangerous)
-    L = ["", head(f"Permissions ({len(perms)}, {len(dang)} dangerous)")]
+    L = ["", head(f"Permissions declared in the manifest ({len(perms)}, {len(dang)} dangerous)")]
     danger, other = [], []
     for p in perms:
         short = p.rsplit(".", 1)[-1]
@@ -157,6 +157,7 @@ def android_permission_lines(perms: List[str], dangerous: List[str], *, full: bo
         w = max(len(r[1]) for r in danger)
         for risk, name, short in danger:
             L.append(f"  {_RISK_STYLE[risk](_RISK_MARK[risk])} {_RISK_STYLE[risk](name.ljust(w))}  {dim(short)}")
+    L.append("  " + dim("Android may add implicit permissions at install (e.g. notifications, media access); those are not listed here."))
     if other:
         L.append("  " + dim("Other (normal) permissions:"))
         shown = other if full else other[:12]
