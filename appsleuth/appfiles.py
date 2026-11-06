@@ -7,6 +7,7 @@ import os
 import plistlib
 import re
 import shutil
+import sys
 import tempfile
 import zipfile
 from typing import Any, Dict, Iterator, List, Optional
@@ -46,7 +47,7 @@ class App:
 
 def _unzip(src: str, dest: str):
     os.makedirs(dest, exist_ok=True)
-    with zipfile.ZipFile(src) as z:
+    with engine.open_zip(src) as z:
         engine._safe_extractall(z, dest)
 
 
@@ -103,7 +104,12 @@ def unpacked(path: str) -> Iterator[App]:
             best = None
             for i, apk in enumerate(apks):
                 dest = os.path.join(work, f"split{i}_" + re.sub(r"\W+", "_", os.path.basename(apk)))
-                _unzip(apk, dest)
+                try:
+                    _unzip(apk, dest)
+                except (zipfile.BadZipFile, OSError, EOFError, NotImplementedError) as e:
+                    print(f"warning: skipped unreadable split {os.path.basename(apk)} ({e})", file=sys.stderr)
+                    shutil.rmtree(dest, ignore_errors=True)
+                    continue
                 app.roots.append(dest)
                 tree = _load_manifest(dest)
                 if tree is not None and not tree.get("split") and best is None:

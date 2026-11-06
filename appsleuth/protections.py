@@ -94,12 +94,12 @@ SIGS: List[Tuple[str, str, str, str, List[str]]] = [
     ("frida", "frida artefact strings", "any", S, ["frida-server", "frida-agent", "re.frida.server", "FridaGadget", "frida-gadget",
                                                    "gum-js-loop", "linjector", "LIBFRIDA"]),
     ("frida", "Thread-name probes (gmain / gdbus)", "android", W, ["gmain", "gdbus", "pool-frida"]),
-    ("frida", "Frida default port probe (27042)", "any", W, [":27042", "27042"]),
+    ("frida", "Frida default port probe (27042)", "any", W, [":27042", "\x0027042\x00", "\"27042\"", "'27042'", "=27042", "port 27042"]),
     ("frida", "/proc/self/maps scan", "android", W, ["/proc/self/maps", "/proc/%d/maps"]),
     ("frida", "Frida on-disk / network probes", "android", W, ["/data/local/tmp/frida-server", "/data/local/tmp/re.frida.server", "frida_agent_main", "frida-helper",
                                                               "/proc/net/tcp", "libfrida-gadget", "frida-gadget.so"]),
     ("frida", "Frida on-disk / network probes", "ios", W, ["/usr/sbin/frida-server", "/usr/lib/frida", "/usr/bin/frida-server", "frida-core", "FridaGadget.dylib"]),
-    ("frida", "D-Bus handshake probe (AUTH)", "any", W, ["AUTH\r\n", "\x00AUTH"]),
+    ("frida", "D-Bus handshake probe (AUTH)", "any", W, ["AUTH\r\n"]),
     ("frida", "Thread / fd enumeration under /proc/self", "android", W, ["/proc/self/task", "/proc/%d/task", "/proc/self/fd", "/proc/%d/fd"]),
     ("frida", "Inline-hook / library-integrity probes (libc on-disk path)", "android", W, ["/system/lib64/libc.so", "/system/lib/libc.so",
                                                                                            "/apex/com.android.runtime/lib64/bionic/libc.so",
@@ -215,6 +215,70 @@ def _is_macho(path: str) -> bool:
         return False
 
 
+def _strip_codesig(data: bytes) -> bytes:
+    """Blank the LC_CODE_SIGNATURE blob of every Mach-O slice: its embedded entitlements / requirements
+    (get-task-allow, team ids ...) are signing metadata, not code that performs a check."""
+    import struct
+    if len(data) < 32:
+        return data
+    magic = struct.unpack_from(">I", data, 0)[0]
+    slices = []
+    if magic in (0xcafebabe, 0xcafebabf):
+        n = struct.unpack_from(">I", data, 4)[0]
+        wide = magic == 0xcafebabf
+        for i in range(min(n, 16)):
+            if wide:
+                off = struct.unpack_from(">Q", data, 8 + i * 32 + 8)[0]
+            else:
+                off = struct.unpack_from(">I", data, 8 + i * 20 + 8)[0]
+            slices.append(off)
+    else:
+        slices.append(0)
+    spans = []
+    for base in slices:
+        if base + 32 > len(data):
+            continue
+        m = struct.unpack_from("<I", data, base)[0]
+        if m not in (0xfeedface, 0xfeedfacf):
+            continue
+        ncmds = struct.unpack_from("<I", data, base + 16)[0]
+        p = base + (32 if m == 0xfeedfacf else 28)
+        for _ in range(min(ncmds, 4096)):
+            if p + 8 > len(data):
+                break
+            cmd, size = struct.unpack_from("<II", data, p)
+            if cmd == 0x1d and p + 16 <= len(data):
+                off, sz = struct.unpack_from("<II", data, p + 8)
+                spans.append((base + off, base + off + sz))
+            if size < 8:
+                break
+            p += size
+    if not spans:
+        return data
+    b = bytearray(data)
+    for s, e in spans:
+        s, e = max(0, s), min(len(b), e)
+        if s < e:
+            b[s:e] = bytes(e - s)
+    return bytes(b)
+
+
+# Needles that, inside a dex, are an unrelated identifier rather than a check. WindowManager's FLAG_SECURE is a
+# compile-time constant (javac / d8 inline 0x2000), so the bare string "FLAG_SECURE" in a dex is a field of some other class
+# (androidx.media AudioAttributesCompat.FLAG_SECURE, an audio-routing flag). Real secure-window code is found through
+# the Window.addFlags / setFlags probe instead.
+BENIGN_DEX_FIELDS = {"FLAG_SECURE": ()}
+_BENIGN_DEX = {k.encode() for k in BENIGN_DEX_FIELDS}
+
+
+def _benign(needle: bytes, rel: str, data: bytes) -> bool:
+    """True when every occurrence of the needle in a dex is the bare identifier string (MUTF-8 length byte + name + NUL),
+    i.e. a field / constant name; a longer string containing it (a config key, a log message) still counts."""
+    if needle not in _BENIGN_DEX or not rel.endswith(".dex"):
+        return False
+    return data.count(needle) == data.count(bytes([len(needle)]) + needle + b"\0")
+
+
 def _candidate_files(app: appfiles.App) -> Iterable[str]:
     for p in app.files():
         ext = os.path.splitext(p)[1].lower()
@@ -242,12 +306,14 @@ def detect(app: appfiles.App) -> Dict[str, Any]:
                 data = fh.read()
         except OSError:
             continue
+        if data[:4] in MACHO_MAGIC:
+            data = _strip_codesig(data)
         # Frida's own libraries ship inside gadget-style repackaged apps; a frida *library* is not a detector.
         for cat, label, _pl, _st, needles in sigs:
             key = (cat, label)
             if len(hits.get(key, ())) >= 3:
                 continue
-            if any(n in data for n in needles):
+            if any(n in data and not _benign(n, rel, data) for n in needles):
                 hits.setdefault(key, set()).add(rel)
     # file-name based indicators (packer libraries) and Android network-security-config pins
     for p in app.files():

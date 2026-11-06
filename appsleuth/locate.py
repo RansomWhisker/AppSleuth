@@ -119,6 +119,9 @@ def locate_dex(path: str, rel: str, sigs) -> List[Dict[str, Any]]:
     for mi, (ci, _pi, ni) in enumerate(dx.method_ids):
         by_name.setdefault(ni, []).append(mi)
         by_class.setdefault(ci, []).append(mi)
+    by_field: Dict[int, List[int]] = {}
+    for fi, (_ci, _ti, ni) in enumerate(dx.field_ids):
+        by_field.setdefault(ni, []).append(fi)
     defined = {mi for _c, mi in dx.defs}
     defined_class = {c["class_idx"] for c in dx.classes}
     seen = set()
@@ -146,9 +149,10 @@ def locate_dex(path: str, rel: str, sigs) -> List[Dict[str, Any]]:
                 if n in s:
                     hit = n
                     break
-            if hit is None:
+            if hit is None or s in protections.BENIGN_DEX_FIELDS:      # the bare identifier, not a longer string
                 continue
             shown = (s if len(s) <= 80 else s[:77] + "...").replace("\n", "\\n").replace("\r", "\\r")
+            n_before = len(out)
             # 1. methods loading the string constant
             for lab in dx.string_owners.get(sidx, []):
                 add(cat, label, "java-method", lab, 'uses string "%s"' % shown, lab.split("->")[0])
@@ -173,6 +177,18 @@ def locate_dex(path: str, rel: str, sigs) -> List[Dict[str, Any]]:
                     add(cat, label, "java-method", mlabel(mj), "method defined (name matches)", owner_desc(mj))
                 for caller in sorted(dx.callees.get(mj, ())):
                     add(cat, label, "java-method", mlabel(caller), "calls %s" % mlabel(mj), owner_desc(caller))
+            # 4. a field name: who reads / writes it? (constants javac inlined leave only the field itself)
+            for fi in by_field.get(sidx, []):
+                fci = dx.field_ids[fi][0]
+                fname = "%s.%s" % (_java_name(dx.type_name(fci)), s)
+                users = sorted(dx.field_users.get(fi, ()))
+                for mi in users:
+                    add(cat, label, "java-method", mlabel(mi), "accesses field %s" % fname, owner_desc(mi))
+                if not users:
+                    add(cat, label, "java-field", fname, "field referenced", dx.type_name(fci))
+            if len(out) == n_before:
+                add(cat, label, "java-string", '"%s"' % shown, "in the dex string table only: no code loads it "
+                    "(debug-info name, annotation or Kotlin metadata)", "")
     out += _dex_probes(dx, rel, out)
     return _merge_methods(out)
 
@@ -232,10 +248,11 @@ def _merge_methods(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         vs = reasons[k]
         strs = [v[len("uses string "):] for v in vs if v.startswith("uses string ")]
         rest = [v for v in vs if not v.startswith("uses string ")]
-        parts = rest[:]
-        if strs:
+        parts = []
+        if strs:  # the string constant is the most direct evidence, so it goes first
             more = " (+%d more)" % (len(strs) - 4) if len(strs) > 4 else ""
             parts.append("uses string%s %s%s" % ("s" if len(strs) > 1 else "", ", ".join(strs[:4]), more))
+        parts += rest
         via = "; ".join(parts[:4])
         merged[k]["via"] = via if len(via) <= 220 else via[:217] + "..."
     return [merged[k] for k in order]
