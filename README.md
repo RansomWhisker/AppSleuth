@@ -1,6 +1,6 @@
 # AppSleuth
 
-> A tool by [**rudranetra.com**](https://rudranetra.com) · more at [rudranetra.com/tools](https://rudranetra.com/tools)
+> A tool by [**rudranetra.com**](https://rudranetra.com) · website: [rudranetra.com/tools/appsleuth](https://rudranetra.com/tools/appsleuth/) · more tools at [rudranetra.com/tools](https://rudranetra.com/tools)
 
 One tool for mobile app security triage. Works on macOS, Linux and Windows (device pulls on Windows are experimental). Analyses **IPA**, **APK**, **APKS/XAPK** and **AAB**. Python standard library only.
 
@@ -19,9 +19,12 @@ One tool for mobile app security triage. Works on macOS, Linux and Windows (devi
 
 ## Install
 
-    pipx install appsleuth   # recommended
-    pip install .          # or, from a clone: gives you the `appsleuth` command
-    python3 -m appsleuth …   # or run in place
+    pipx install appsleuth        # recommended
+    pipx inject appsleuth frida   # optional: adds Frida for `appsleuth runtime`
+    pip install .                 # or, from a clone: gives you the `appsleuth` command
+    python3 -m appsleuth …        # or run in place
+
+With plain `pip`, install the runtime extra instead: `pip install "appsleuth[runtime]"`.
 
 ## Tech stack (`info`)
 
@@ -49,13 +52,16 @@ named `sub_<address>`. FairPlay-encrypted binaries get no code cross-references 
 ## Examples
 
     appsleuth scan app.ipa --fail-on HIGH
+    appsleuth scan app.apk --format json > result.json   # stdout is pure JSON; status lines go to stderr
+    appsleuth scan app.apk --write-baseline base.json    # later: --baseline base.json hides known findings
     appsleuth info RSWealth.apks --full   # also lists every code location of each protection check
     appsleuth diff v1.apk v2.apk --fail-on-regression
     appsleuth data --ios --host 9 -b com.example.app
     appsleuth data --android -p com.example.app --method auto
     appsleuth data --audit-dir ./pulled --platform android
 
-Reports (`report.json/md/html`) are written to `-o DIR`.
+Reports (`report.json/md/html`) are written to `-o DIR`. A baseline keeps matching when the app file is renamed (for
+example a new build downloaded as `app-2.0.apk`): the file name is not part of a finding's identity.
 
 **Encrypted IPAs:** if the main binary (or a framework) is still FairPlay-encrypted, AppSleuth cannot see its code, so it prints a warning and puts it at the top of every report. A clean result on such a file does not mean the app is secure; re-dump it decrypted and scan again.
 
@@ -79,7 +85,9 @@ Reports (`report.json/md/html`) are written to `-o DIR`.
 
 Observe what a running app really does, using Frida: root/jailbreak checks, plaintext HTTP actually requested, ciphers (ECB, DES), credentials written to SharedPreferences/NSUserDefaults, secrets in logs, debuggable WebViews.
 
-    pip install "appsleuth[runtime]"          # adds Frida; frida-server must run on the device
+    pipx inject appsleuth frida               # pipx install: adds Frida to AppSleuth's environment
+    pip install "appsleuth[runtime]"          # pip install: same, via the runtime extra
+    # frida-server must run on the device, at the same version as the Frida installed above
     # (agent sources: appsleuth/runtime_js/agents; rebuild with `npm install && npm run build` there)
     appsleuth runtime --android com.example.app --seconds 90
     appsleuth runtime --ios com.example.app --spawn

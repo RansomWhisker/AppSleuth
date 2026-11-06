@@ -118,6 +118,35 @@ def _files(app: appfiles.App):
         yield full, ext, size
 
 
+def dex_string_blob(blob: bytes) -> bytes:
+    """The dex string table as newline-separated text. Each dex string is preceded by its
+    ULEB128 length; when that byte happens to be a letter or digit (URLs of 48-57, 65-90, 95
+    or 97-122 characters) a regex over the raw file sees no word boundary before "https" and
+    misses the URL. Reading the table gives every string on its own. Falls back to the raw
+    bytes if the header is damaged."""
+    import struct
+    try:
+        if len(blob) < 0x70 or blob[:4] != b"dex\n":
+            return blob
+        n, off = struct.unpack_from("<II", blob, 0x38)
+        if n == 0 or off + 4 * n > len(blob):
+            return blob
+        out = []
+        find = blob.find
+        for (so,) in struct.iter_unpack("<I", blob[off:off + 4 * n]):
+            p = so
+            while p < len(blob) and blob[p] & 0x80:          # skip the ULEB128 length
+                p += 1
+            p += 1
+            e = find(b"\0", p)
+            if e < 0:
+                break
+            out.append(blob[p:e])
+        return b"\n".join(out)
+    except Exception:
+        return blob
+
+
 def scan_files(app: appfiles.App) -> Dict[str, Dict[str, Any]]:
     hosts: Dict[str, Dict[str, Any]] = {}
     paths: Dict[str, int] = defaultdict(int)
@@ -128,6 +157,8 @@ def scan_files(app: appfiles.App) -> Dict[str, Dict[str, Any]]:
         except OSError:
             continue
         label = app.rel(full)
+        if blob[:4] == b"dex\n":
+            blob = dex_string_blob(blob)
         for m in URL_RE.finditer(blob):
             parsed = _clean_url(m.group(1), m.group(2), m.group(3), m.group(4))
             if not parsed:

@@ -100,8 +100,10 @@ def discover(app: appfiles.App) -> Dict[str, Any]:
                 blob = fh.read()
         except OSError:
             continue
-        if b"://" not in blob:
+        if b"://" not in blob and b"googleapis.com/" not in blob:     # bucket hosts can appear without a scheme
             continue
+        if blob[:4] == b"dex\n":
+            blob = endpoints.dex_string_blob(blob)                # one string per line: no length-byte artefacts
         label = app.rel(full)
         for kind, rx in PATTERNS:
             for m in rx.finditer(blob):

@@ -73,3 +73,48 @@ class ZeroFillSections(unittest.TestCase):
         hdr = struct.pack("<IiiIIIII", 0xfeedfacf, 0x0100000C, 0, 6, 1, len(seg + sect), 0, 0)
         m = locate_macho.Macho(hdr + seg + sect)
         self.assertEqual(m.sec("__bss")["fsize"], 0)
+
+
+class DexUrls(unittest.TestCase):
+    def _dex(self, strings):
+        data = bytearray(b"dex\n035\0" + b"\0" * 0x68)
+        ids = len(data)
+        data += b"\0" * (4 * len(strings))
+        for i, st in enumerate(strings):
+            struct.pack_into("<I", data, ids + 4 * i, len(data))
+            data += bytes([len(st)]) + st + b"\0"
+        struct.pack_into("<II", data, 0x38, len(strings), ids)
+        return bytes(data)
+
+    def test_url_whose_length_byte_is_a_letter(self):
+        from appsleuth import endpoints
+        u = b"https://api.example-host.com/" + b"a" * 43           # 72 chars: length byte is 'H'
+        blob = self._dex([b"short", u])
+        self.assertFalse(list(endpoints.URL_RE.finditer(blob)))   # the raw bytes hide it
+        found = [m.group(0) for m in endpoints.URL_RE.finditer(endpoints.dex_string_blob(blob))]
+        self.assertEqual(found, [u])
+
+    def test_damaged_dex_falls_back_to_raw_bytes(self):
+        from appsleuth import endpoints
+        self.assertEqual(endpoints.dex_string_blob(b"dex\nXXXX"), b"dex\nXXXX")
+
+
+class BaselineRename(unittest.TestCase):
+    def test_baseline_survives_renamed_app_file(self):
+        import json
+        import os
+        import tempfile
+        from appsleuth import engine
+        f = {"title": "Weak cipher", "location": "MyApp-1.0.apk:dex (classes.dex)", "severity": "LOW"}
+        old = {"input_file": "/x/MyApp-1.0.apk", "findings": [dict(f)]}
+        p = os.path.join(tempfile.mkdtemp(), "b.json")
+        engine.write_baseline(old, p)
+        new = {"input_file": "/y/myapp_v2.apk", "findings": [dict(f, location="myapp_v2.apk:dex (classes.dex)")]}
+        r = engine.apply_baseline(new, engine.load_baseline(p), p)
+        self.assertEqual((len(r["findings"]), r["suppressed_count"]), (0, 1))
+
+    def test_old_style_baseline_still_matches(self):
+        from appsleuth import engine
+        f = {"title": "t", "location": "A.apk:dex", "severity": "LOW"}
+        r = engine.apply_baseline({"input_file": "A.apk", "findings": [dict(f)]}, {engine.finding_fingerprint(f): {}}, "b")
+        self.assertEqual(r["suppressed_count"], 1)
