@@ -5,7 +5,7 @@ WebView or a server can all write there), so this module reads it defensively:
   * SQLite is opened read-only/immutable with an authorizer that only permits SELECTs
   * XML containing a DOCTYPE/ENTITY is rejected rather than parsed
   * per-file and total size caps; symlinks are never followed
-  * values are REDACTED in findings unless the caller explicitly asks to reveal a preview
+  * found values are shown in full by default (reports are sensitive); pass reveal=False / --redact to mask them
 """
 import json
 import os
@@ -90,12 +90,17 @@ def classify_value(v: Any) -> Tuple[str, bool]:
 
 
 def redact(v: Any, reveal: bool) -> str:
+    """The value as text (capped), or a placeholder when masking was requested."""
     if not reveal:
         return "<redacted>"
     if isinstance(v, (bytes, bytearray)):
-        v = bytes(v)[:24]
+        raw = bytes(v)
+        try:
+            v = raw[:400].decode("utf-8")
+        except UnicodeDecodeError:
+            v = "0x" + raw[:64].hex()
     s = str(v)
-    return (s[:4] + "…" + f"({len(s)})") if len(s) > 8 else s[:2] + "…"
+    return s if len(s) <= 400 else s[:400] + f"…(+{len(s) - 400} chars)"
 
 
 # ----------------------------------------------------------------------- walking
@@ -241,7 +246,7 @@ def _audit_sqlite(path: str, rel: str, add, reveal: bool, meta: Dict[str, Any]):
 
 # ------------------------------------------------------------------------ audit
 
-def audit_dir(root: str, platform: str = "ios", *, reveal: bool = False,
+def audit_dir(root: str, platform: str = "ios", *, reveal: bool = True,
               manifest: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Audit an extracted data container. Returns a scan-style result dict."""
     findings: List[Dict[str, Any]] = []
@@ -257,7 +262,7 @@ def audit_dir(root: str, platform: str = "ios", *, reveal: bool = False,
     modes = (manifest or {}).get("modes", {})
     world: List[str] = []
     cred_files: Dict[str, List[Tuple[str, str, int]]] = {}
-    secret_hits: List[Tuple[str, str, str]] = []
+    secret_hits: List[Tuple[str, str, str, str]] = []
     n_files = 0
 
     for full, rel in _walk(root):
@@ -323,16 +328,18 @@ def audit_dir(root: str, platform: str = "ios", *, reveal: bool = False,
                     for m in pattern.finditer(data):
                         v = engine._classify_secret(name, m.group(0), data, m.start())
                         if v and v[0] in ("HIGH", "MEDIUM"):
-                            secret_hits.append((rel, v[1], v[0]))
-                if re.search(rb"(?i)authorization:\s*(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{16,}", data):
+                            secret_hits.append((rel, v[1], v[0], m.group(0).decode('utf-8', 'replace')))
+                am = re.search(rb"(?i)authorization:\s*(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{16,}", data)
+                if am:
                     add("MEDIUM", "Authorization header written to a file",
                         "A request header with credentials was persisted (often a debug/network log). Remove "
                         "request logging from release builds and redact Authorization/Cookie headers.",
-                        location=rel, confidence="confirmed")
-                if "log" in low and re.search(rb"(?i)(password|passwd|pwd)\s*[=:]\s*\S{3,}", data):
+                        evidence=redact(am.group(0), reveal), location=rel, confidence="confirmed")
+                pm = re.search(rb"(?i)(password|passwd|pwd)\s*[=:]\s*\S{3,}", data) if "log" in low else None
+                if pm:
                     add("HIGH", "Password-like value in a log file",
                         "A log line contains `password=` followed by a value. Credentials should never be logged.",
-                        location=rel, confidence="heuristic")
+                        evidence=redact(pm.group(0), reveal), location=rel, confidence="heuristic")
 
         # --- file-type observations
         if low.endswith(".binarycookies") or low.endswith("cookies.sqlite") or low.endswith("/cookies"):
@@ -362,14 +369,15 @@ def audit_dir(root: str, platform: str = "ios", *, reveal: bool = False,
             " Use the Keychain (iOS) or Keystore-backed EncryptedSharedPreferences (Android) instead.",
             evidence="; ".join(d for d, _c, _s in items[:12]), location=rel, confidence="heuristic")
 
-    by_title: Dict[Tuple[str, str], List[str]] = {}
-    for rel, title, sev in secret_hits:
+    by_title: Dict[Tuple[str, str], List[Tuple[str, str]]] = {}
+    for rel, title, sev, token in secret_hits:
         if rel in cred_files:          # already reported key-by-key for this file
             continue
-        by_title.setdefault((title, sev), []).append(rel)
-    for (title, sev), rels in by_title.items():
+        by_title.setdefault((title, sev), []).append((rel, token))
+    for (title, sev), hits in by_title.items():
+        uniq = sorted(set(hits))
         add(sev, f"{title} found in app data", "A credential-shaped string was written to the app's storage.",
-            evidence=", ".join(sorted(set(rels))[:6]), location=sorted(set(rels))[0], confidence="heuristic")
+            evidence="; ".join(f"{r}: {redact(t, reveal)}" for r, t in uniq[:6]), location=uniq[0][0], confidence="heuristic")
 
     if world:
         add("MEDIUM", f"{len(world)} world-readable/writable file(s) in the app's private directory",

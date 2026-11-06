@@ -86,17 +86,26 @@ class Audit(unittest.TestCase):
         for k in ("isLoggedIn", "hasToken", "tokenExpiry", "passwordHint", "theme", "retryCount", "author", "pinned"):
             self.assertFalse(sk(k), k)
 
-    def test_plist_flagged_and_redacted(self):
+    def test_values_shown_by_default(self):
         self.put("Library/Preferences/a.plist", plistlib.dumps({"authToken": self.JWT, "isLoggedIn": True, "userPassword": "hunter2hunter2"}))
         r = dataaudit.audit_dir(self.root, "ios")
         self.assertEqual(r["summary"]["HIGH"], 1)
-        self.assertNotIn("hunter2hunter2", json.dumps(r))
-        self.assertNotIn(self.JWT, json.dumps(r))
+        self.assertIn("hunter2hunter2", json.dumps(r))
+        self.assertIn(self.JWT, json.dumps(r))
 
-    def test_reveal_shows_preview_only(self):
-        self.put("a.plist", plistlib.dumps({"authToken": self.JWT}))
-        r = dataaudit.audit_dir(self.root, "ios", reveal=True)
-        self.assertNotIn(self.JWT, json.dumps(r))            # never the whole value
+    def test_redact_masks_everything(self):
+        self.put("Library/Preferences/a.plist", plistlib.dumps({"authToken": self.JWT, "userPassword": "hunter2hunter2"}))
+        self.put("a.log", b"Authorization: Bearer abcdefghijklmnop0123456789\npassword=hunter2hunter2\n")
+        r = dataaudit.audit_dir(self.root, "ios", reveal=False)
+        text = json.dumps(r)
+        for secret in ("hunter2hunter2", self.JWT, "abcdefghijklmnop0123456789"):
+            self.assertNotIn(secret, text)
+
+    def test_log_findings_show_the_value(self):
+        self.put("a.log", b"Authorization: Bearer abcdefghijklmnop0123456789\npassword=hunter2hunter2\n")
+        text = json.dumps(dataaudit.audit_dir(self.root, "ios"))
+        self.assertIn("abcdefghijklmnop0123456789", text)
+        self.assertIn("hunter2hunter2", text)
 
     def test_sqlite_column_with_quote_and_localstorage(self):
         os.makedirs(os.path.join(self.root, "Library/WebKit"))

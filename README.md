@@ -74,7 +74,7 @@ Findings are leads for manual review, not confirmed vulnerabilities; each carrie
 
 ## `appsleuth data` safety
 
-Values are **redacted by default** (`--show-values` shows a short preview, never the full secret). Pulled archives are extracted defensively (regular files only, no links, no traversal, size/count caps); SQLite is opened read-only with an authorizer; XML with a DOCTYPE is refused; host/user/package inputs are validated and shell-quoted. Only use it on devices and apps you are authorised to test.
+Found values (tokens, passwords, keys, headers) are **shown in full** so you can verify and reproduce a finding; the reports therefore contain real credentials, so treat them as sensitive. Add `--redact` to mask values instead. Pulled archives are extracted defensively (regular files only, no links, no traversal, size/count caps); SQLite is opened read-only with an authorizer; XML with a DOCTYPE is refused; host/user/package inputs are validated and shell-quoted. Only use it on devices and apps you are authorised to test.
 
 ## Tests
 

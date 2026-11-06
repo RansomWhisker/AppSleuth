@@ -143,6 +143,24 @@ class Cloud(unittest.TestCase):
         self.assertTrue(any(f["severity"] == "HIGH" and "Realtime" in f["title"] for f in res["findings"]))
         self.assertNotIn('"a":1', json.dumps(res))              # body never stored
 
+    def test_commented_out_and_tiny_names_skipped(self):
+        ipa = make_ipa({"a.js": b"//   const url = 'https://testcdncss.s3.ap-south-1.amazonaws.com/e.json';\n"
+                                b"var live = 'https://livebucket-assets.s3.amazonaws.com/x'; s3://doc\n",
+                        "a.js.map": b'"https://mapbucket-x.s3.amazonaws.com/y"'})
+        names = {b["name"] for b in cloud.run(ipa)["meta"]["backends"]}
+        self.assertEqual(names, {"livebucket-assets"})
+
+    def test_reserved_firebase_bucket_404_is_info(self):
+        f = cloud.check_backend({"kind": "gcs", "name": "proj-1234.appspot.com"},
+                                lambda *a, **k: (404, {}, b"Not Found"))
+        self.assertEqual(f["severity"], "INFO")
+
+    def test_listable_s3_severity_depends_on_ownership(self):
+        listing = lambda *a, **k: (200, {}, b"<ListBucketResult><Key>a</Key>")
+        mine = cloud.check_backend({"kind": "s3", "name": "acmecorp-assets"}, listing, cloud.owner_tokens("com.acmecorp.app", None))
+        theirs = cloud.check_backend({"kind": "s3", "name": "app-creatives"}, listing, cloud.owner_tokens("com.acmecorp.app", None))
+        self.assertEqual((mine["severity"], theirs["severity"]), ("HIGH", "MEDIUM"))
+
     def test_denied_is_info(self):
         f = cloud.check_backend({"kind": "rtdb", "name": "x-default-rtdb.firebaseio.com"}, lambda *a, **k: (401, {}, b""))
         self.assertEqual(f["severity"], "INFO")

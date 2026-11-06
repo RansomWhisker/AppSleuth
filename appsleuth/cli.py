@@ -331,7 +331,7 @@ def cmd_data(a):
     from . import dataaudit, devdata
 
     def audit_and_report(root: str, platform: str, out: str, manifest=None):
-        res = dataaudit.audit_dir(root, platform, reveal=a.show_values, manifest=manifest)
+        res = dataaudit.audit_dir(root, platform, reveal=not a.redact, manifest=manifest)
         res = triage.apply(res, rules=_rules(a, root), min_severity=a.min_severity, corroborate=False)
         write_reports(res, out, "App data audit")
         print(f"\n{_counts(res['summary'])}")
@@ -498,7 +498,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("-o", "--outdir")
     g.add_argument("--no-audit", action="store_true", help="only pull; skip the storage audit")
     g.add_argument("--no-keep-data", action="store_true", help="delete the pulled data after auditing")
-    g.add_argument("--show-values", action="store_true", help="include a short preview of secret values in the report")
+    g.add_argument("--redact", action="store_true", help="mask found secret values in the report (default: shown in full)")
+    g.add_argument("--show-values", action="store_true", help=argparse.SUPPRESS)      # old flag; values are shown by default now
     g.add_argument("--show", choices=["HIGH", "MEDIUM", "LOW", "INFO"], default="LOW")
     g.add_argument("-v", "--verbose", action="store_true")
     g.add_argument("--ignore-file")
