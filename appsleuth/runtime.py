@@ -123,6 +123,17 @@ def events_to_result(events: Iterable[Dict[str, Any]], platform: str, target: st
                     "Log output is readable by other tools on the device (and by anyone with adb/Console). "
                     "Remove it from release builds.", evidence=f"tag={e.get('tag', '')}")
 
+    verifiers = sorted({e.get("cls", "") for e in by.get("hostname_verifier", []) if e.get("cls")})
+    if verifiers:
+        loose = [v for v in verifiers if re.search(r"(?i)allow.?all|trust.?all|insecure|accept.?all|null.?host|no.?op", v)]
+        if loose:
+            add("HIGH", "Hostname verification may be disabled",
+                "A default HostnameVerifier with a permissive-sounding name was installed. If it accepts any "
+                "host, TLS connections can be intercepted.", evidence=", ".join(loose[:4]), conf="heuristic")
+        else:
+            add("INFO", "Custom default hostname verifier installed (observed)",
+                "Review that it actually checks the host name.", evidence=", ".join(verifiers[:4]), conf="heuristic")
+
     if by.get("webview_debug"):
         add("MEDIUM", "WebView debugging enabled at runtime",
             "setWebContentsDebuggingEnabled(true) was called; pages can be inspected over USB and may leak data.")
@@ -136,6 +147,12 @@ def events_to_result(events: Iterable[Dict[str, Any]], platform: str, target: st
                 "kSecAttrAccessibleAlways can be read while the device is locked (and is deprecated). "
                 "Use WhenUnlocked, or AfterFirstUnlock only if background access is required.",
                 evidence=", ".join(weak), conf="heuristic")
+
+    if platform == "ios" and by.get("early_exit") and not by.get("ready"):
+        add("INFO", "App exited right after launch while instrumented",
+            "On jailbroken devices this is often jailbreak/tamper detection, but it could also be a hook "
+            "problem. Try attach mode (open the app first, then run without --spawn). AppSleuth does not "
+            "bypass these checks.", conf="heuristic")
 
     summary = {s: sum(1 for f in findings if f["severity"] == s) for s in ("HIGH", "MEDIUM", "LOW", "INFO")}
     return {
@@ -166,6 +183,31 @@ def _pick_usb_device(frida, platform: str):
     return frida.get_usb_device(timeout=10)
 
 
+def mismatch_hint(frida_version: str) -> str:
+    major = frida_version.split(".")[0]
+    return (f"Python Frida is {frida_version} but frida-server does not match it (the major version must "
+            f"agree, ideally the exact version). Install the matching server from "
+            f"https://github.com/frida/frida/releases (frida-server-{frida_version}-<os>-<arch>), or run "
+            f"`pip install frida=={major}.*` to match the server you already have.")
+
+
+def looks_like_version_mismatch(exc: BaseException) -> bool:
+    msg = f"{type(exc).__name__} {exc}".lower()
+    return ("protocolerror" in msg or "major versions match" in msg or "unexpected message" in msg
+            or "unable to communicate with remote frida-server" in msg)
+
+
+def _check_server_compat(frida, dev) -> None:
+    """Fail early with a clear message when frida-server and the Python bindings disagree,
+    instead of a cryptic ProtocolError halfway through attaching."""
+    try:
+        dev.query_system_parameters()
+    except Exception as e:
+        if looks_like_version_mismatch(e):
+            raise RuntimeError(mismatch_hint(getattr(frida, "__version__", "?"))) from e
+        # anything else (e.g. server not running) is reported by the later attach/spawn
+
+
 def run_probe(platform: str, target: str, *, seconds: int = 60, spawn: bool = False,
               device_id: Optional[str] = None, host: Optional[str] = None) -> List[Dict[str, Any]]:
     """Attach (or spawn) with Frida and collect events for `seconds`. Needs the frida module."""
@@ -183,6 +225,7 @@ def run_probe(platform: str, target: str, *, seconds: int = 60, spawn: bool = Fa
         dev = frida.get_device(device_id, timeout=10)
     else:
         dev = _pick_usb_device(frida, platform)
+    _check_server_compat(frida, dev)
     with open(os.path.join(JS_DIR, f"{platform}.js"), encoding="utf-8") as fh:
         source = fh.read()
     events: List[Dict[str, Any]] = []
@@ -241,11 +284,14 @@ def run_probe(platform: str, target: str, *, seconds: int = 60, spawn: bool = Fa
         if pid is None:
             raise RuntimeError(f"{target} is not running; start it first, or use --spawn")
         session, script = start(pid, False)
+    t0 = time.time()
     try:
         time.sleep(max(1, seconds))
     except KeyboardInterrupt:
         pass
     finally:
+        if state["detached"] is not None:      # the process went away before the window ended
+            events.append({"t": "early_exit", "reason": str(state["detached"])[:60], "after_s": round(time.time() - t0, 1)})
         try:
             script.unload()
             session.detach()

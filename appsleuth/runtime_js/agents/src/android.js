@@ -56,6 +56,27 @@ function install() {
     };
   });
 
+  // --- other HTTP stacks: Cronet, and TLS hostname verifiers (observe only) -----------------------------
+  tryHook('cronet', function () {
+    // Cronet builds requests through UrlRequest.Builder; the URL is the first constructor argument.
+    var C = Java.use('org.chromium.net.impl.CronetUrlRequestContext');
+    var nb = C.newUrlRequestBuilder.overload('java.lang.String', 'org.chromium.net.UrlRequest$Callback', 'java.util.concurrent.Executor');
+    nb.implementation = function (url, cb, ex) {
+      var u = String(url);
+      if (u.indexOf('http://') === 0) emit('cleartext', { url: trunc(u, 200), via: 'cronet' });
+      return nb.call(this, url, cb, ex);
+    };
+  });
+  tryHook('hostname_verifier', function () {
+    // HttpsURLConnection.setDefaultHostnameVerifier is where "accept any host" verifiers get installed.
+    var H = Java.use('javax.net.ssl.HttpsURLConnection');
+    var sv = H.setDefaultHostnameVerifier;
+    sv.implementation = function (v) {
+      emit('hostname_verifier', { cls: trunc(v ? v.$className : 'null', 120) });
+      return sv.call(this, v);
+    };
+  });
+
   // --- crypto the app really uses ---------------------------------------------------------
   tryHook('cipher', function () {
     var Cipher = Java.use('javax.crypto.Cipher');
