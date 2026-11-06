@@ -90,7 +90,7 @@ import tempfile
 import zipfile
 from collections import Counter
 from dataclasses import dataclass, field, asdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # --------------------------------------------------------------------------
 # Findings model
@@ -560,8 +560,14 @@ class DexFile:
     string_id -> [owning "LClass;->method" label, ...] cross-reference built
     by walking every method's bytecode for const-string(/jumbo)."""
 
-    def __init__(self, data: bytes):
+    def __init__(self, data: bytes, track_refs: bool = False):
         self.data = data
+        self.track = track_refs                 # also record who calls which method / uses which type
+        self.callees: Dict[int, Set[int]] = {}  # callee method_idx -> {caller method_idx}
+        self.type_users: Dict[int, Set[int]] = {}  # type_idx -> {method_idx} (const-class, new-instance, check-cast, ...)
+        self.field_ids: List[Tuple[int, int, int]] = []   # (class_idx, type_idx, name_idx), only with track_refs
+        self.field_users: Dict[int, Set[int]] = {}      # field_idx -> {method_idx}
+        self.defs: List[Tuple[int, int]] = []   # (class type_idx, method_idx) for every method defined in this dex
         self.strings: List[str] = []
         self.type_ids: List[int] = []          # string_id index per type
         self.method_ids: List[Tuple[int, int, int]] = []  # (class_idx, proto_idx, name_idx)
@@ -589,7 +595,7 @@ class DexFile:
         if len(d) < 0x70 or d[:4] != b'dex\n':
             raise ValueError("Not a DEX file (bad magic)")
         (string_ids_size, string_ids_off, type_ids_size, type_ids_off,
-         proto_ids_size, _proto_ids_off, field_ids_size, _field_ids_off,
+         proto_ids_size, _proto_ids_off, field_ids_size, field_ids_off,
          method_ids_size, method_ids_off, class_defs_size, class_defs_off,
          _data_size, _data_off) = struct.unpack_from('<14I', d, 0x38)
 
@@ -617,6 +623,8 @@ class DexFile:
             name_idx = struct.unpack_from('<I', d, off + 4)[0]
             methods.append((class_idx, proto_idx, name_idx))
         self.method_ids = methods
+        if self.track:
+            self.field_ids = [struct.unpack_from('<HHI', d, field_ids_off + i * 8) for i in range(field_ids_size)]
 
         # ---- class_defs + class_data (direct/virtual methods -> code_item) ----
         for i in range(class_defs_size):
@@ -667,6 +675,8 @@ class DexFile:
                 method_idx = prev_idx + diff
                 prev_idx = method_idx
                 method_count_total += 1
+                if self.track:
+                    self.defs.append((class_entry["class_idx"], method_idx))
                 if code_off:
                     try:
                         self._walk_code_item(code_off, method_idx)
@@ -715,6 +725,14 @@ class DexFile:
                 self.string_owners.setdefault(str_idx, [])
                 if label not in self.string_owners[str_idx]:
                     self.string_owners[str_idx].append(label)
+
+            elif self.track:
+                if 0x6e <= low_byte <= 0x72 or 0x74 <= low_byte <= 0x78:
+                    self.callees.setdefault(struct.unpack_from('<H', d, unit_off + 2)[0], set()).add(method_idx)
+                elif 0x52 <= low_byte <= 0x6d:
+                    self.field_users.setdefault(struct.unpack_from('<H', d, unit_off + 2)[0], set()).add(method_idx)
+                elif low_byte in (0x1c, 0x1f, 0x20, 0x22, 0x23):
+                    self.type_users.setdefault(struct.unpack_from('<H', d, unit_off + 2)[0], set()).add(method_idx)
 
             i += length
 
@@ -1362,6 +1380,7 @@ class ResourceTable:
         self.global_strings: List[Optional[str]] = []
         # resource_id -> (type_name, key_name, resolved_value_or_None)
         self.entries: Dict[int, Tuple[str, str, Optional[str]]] = {}
+        self.refs: Dict[int, int] = {}          # resource_id -> id it points to (value is another resource)
         self._parse(data)
 
     def resolve(self, res_id) -> Optional[str]:
@@ -1370,8 +1389,16 @@ class ResourceTable:
             if not m:
                 return None
             res_id = int(m.group(1), 16)
-        entry = self.entries.get(res_id)
-        return entry[2] if entry else None
+        for _ in range(6):                       # follow @string/... -> @string/... chains
+            entry = self.entries.get(res_id)
+            if entry is None:
+                return None
+            if entry[2] is not None:
+                return entry[2]
+            if res_id not in self.refs:
+                return None
+            res_id = self.refs[res_id]
+        return None
 
     def describe(self, res_id) -> Optional[str]:
         if isinstance(res_id, str):
@@ -1454,13 +1481,32 @@ class ResourceTable:
         entries_base = chunk_start + entries_start
         type_name = type_strings[type_id - 1] if 0 < type_id <= len(type_strings) else f"type{type_id}"
 
-        for entry_idx in range(entry_count):
-            off_pos = offsets_base + entry_idx * 4
-            if off_pos + 4 > len(data):
-                break
-            entry_off = _u32(data, off_pos)
-            if entry_off == 0xffffffff:
-                continue  # NO_ENTRY for this configuration
+        type_flags = data[chunk_start + 9]
+        sparse = bool(type_flags & 0x01)         # ResTable_type::FLAG_SPARSE: (idx, offset/4) pairs
+        offset16 = bool(type_flags & 0x02)       # ResTable_type::FLAG_OFFSET16: 16-bit offsets, in units of 4
+        for slot in range(entry_count):
+            if sparse:
+                pos_ = offsets_base + slot * 4
+                if pos_ + 4 > len(data):
+                    break
+                packed = _u32(data, pos_)
+                entry_idx, entry_off = packed & 0xFFFF, (packed >> 16) * 4
+            elif offset16:
+                pos_ = offsets_base + slot * 2
+                if pos_ + 2 > len(data):
+                    break
+                o16 = _u16(data, pos_)
+                if o16 == 0xFFFF:
+                    continue
+                entry_idx, entry_off = slot, o16 * 4
+            else:
+                pos_ = offsets_base + slot * 4
+                if pos_ + 4 > len(data):
+                    break
+                entry_off = _u32(data, pos_)
+                if entry_off == 0xffffffff:
+                    continue  # NO_ENTRY for this configuration
+                entry_idx = slot
             res_id = (package_id << 24) | (type_id << 16) | entry_idx
             if res_id in self.entries:
                 continue  # first config we see for a given id wins
@@ -1481,6 +1527,8 @@ class ResourceTable:
                         value = 'true' if vdata else 'false'
                     elif vtype in (0x10, 0x11):  # dec / hex int
                         value = str(vdata)
+                    elif vtype == 0x01:          # reference to another resource
+                        self.refs.setdefault(res_id, vdata)
             # complex ("bag") entries (styles/arrays/attrs) are left unresolved (value stays None)
             self.entries[res_id] = (type_name, key_name, value)
 
@@ -1687,6 +1735,24 @@ def analyze_apk(apk_path: str, workdir: str, label: str = None) -> Tuple[Finding
             return restable.describe(value)
         return None
 
+    def resolve_label(value: Optional[str]) -> Optional[str]:
+        """The app's display name: the string itself, not a debug description of the resource."""
+        if not value:
+            return None
+        if value.startswith('@0x'):
+            if restable is None:
+                return None
+            label = restable.resolve(value)
+            if label is None:       # reference to a resource whose own value is a further reference: look it up by key
+                m = re.match(r'@?0x([0-9a-fA-F]+)', value)
+                entry = restable.entries.get(int(m.group(1), 16)) if m else None
+                if entry and entry[0] == "string":
+                    label = restable.string_entries_by_key().get(entry[1])
+            return label
+        if value.startswith('@'):
+            return None
+        return value                # a literal android:label="Docs"
+
     # ---- Manifest ----
     try:
         root = build_manifest_tree(open(manifest_path, 'rb').read())
@@ -1766,7 +1832,7 @@ def analyze_apk(apk_path: str, workdir: str, label: str = None) -> Tuple[Finding
                               "one explicitly with certificate pinning for sensitive endpoints.",
                               location="AndroidManifest.xml <application>", confidence="confirmed")
 
-            meta["app_label_resolved"] = resolve_ref(app.get("label"))
+            meta["app_label_resolved"] = resolve_label(app.get("label"))
 
             meta["exported_components"] = _manifest_component_findings(app, findings, package)
             _task_hijack_findings(app, findings, package)
@@ -2892,6 +2958,23 @@ def analyze_aab(path: str, workdir: str) -> Tuple[FindingsBag, Dict[str, Any]]:
 # Dispatcher
 # --------------------------------------------------------------------------
 
+def unrecognised_message(path: str) -> str:
+    """Why a file was not recognised, in terms the user can act on."""
+    kind = "an APK, APKS/XAPK, AAB or IPA file"
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            head = fh.read(4)
+    except OSError:
+        return f"Could not read '{path}'."
+    if head[:2] == b"PK" and not zipfile.is_zipfile(path):
+        return (f"'{path}' ({size / 1e6:.1f} MB) is a corrupt or truncated zip archive: the index at the end of "
+                f"the file is missing, so the download or copy was probably cut short. Re-download or re-copy it.")
+    if head[:2] != b"PK":
+        return f"'{path}' is not a zip archive, so it is not {kind}."
+    return f"Could not recognise '{path}' as {kind}."
+
+
 def detect_kind(path: str) -> str:
     """Returns 'apk', 'apks', 'aab', 'ipa', or 'unknown'."""
     if not zipfile.is_zipfile(path):
@@ -2933,7 +3016,7 @@ def scan(path: str, outdir: str, save_extracted: bool = True) -> Dict[str, Any]:
         elif kind == "ipa":
             findings, meta = analyze_ipa(path, workdir)
         else:
-            raise ValueError(f"Could not recognise '{path}' as an APK, APKS/XAPK, AAB, or IPA file.")
+            raise ValueError(unrecognised_message(path))
         meta["detected_type"] = kind
         if save_extracted:
             shutil.copytree(workdir, os.path.join(outdir, "extracted"), dirs_exist_ok=True)

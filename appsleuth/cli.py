@@ -193,8 +193,18 @@ def cmd_info(a):
         shutil.rmtree(tmp, ignore_errors=True)
     s = info_mod.summarize(res, a.target)
     try:
+        from . import techstack
+        s["tech_stack"] = techstack.detect_path(a.target)
+    except Exception as e:                      # never let the extra check break `info`
+        s["tech_stack_error"] = f"{type(e).__name__}: {e}"
+    try:
         from . import protections
         s["protections"] = protections.detect_path(a.target)
+        if a.full:                               # exhaustive: where every check lives (slower)
+            from . import locate
+            if sys.stderr.isatty():
+                print("locating protection checks in code (this can take a minute)...", file=sys.stderr)
+            s["protections"]["locations"] = locate.locate_path(a.target)
     except Exception as e:                      # never let the extra check break `info`
         s["protections_error"] = f"{type(e).__name__}: {e}"
     if a.json:
@@ -468,7 +478,7 @@ def build_parser() -> argparse.ArgumentParser:
     i = sub.add_parser("info", help="inspect an app: identity, signing, permissions, components, libraries")
     i.add_argument("target")
     i.add_argument("--json", action="store_true")
-    i.add_argument("--full", action="store_true", help="do not truncate long lists")
+    i.add_argument("--full", action="store_true", help="do not truncate long lists; also list every code location of each protection check (slower)")
     triage_opts(i)
     i.set_defaults(fn=cmd_info)
 
