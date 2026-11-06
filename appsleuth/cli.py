@@ -88,7 +88,24 @@ def write_reports(result: Dict[str, Any], outdir: str, title: Optional[str] = No
         text = open(md, encoding="utf-8").read().replace("# Mobile app static security scan:", f"# {title}:", 1)
         open(md, "w", encoding="utf-8").write(text)
     _append_triage_md(md, result)
-    engine.write_html_report(result, os.path.join(outdir, "report.html"))
+    if result.get("warnings"):
+        with open(md, encoding="utf-8") as fh:
+            body = fh.read()
+        banner = "".join(f"> **WARNING: {w}**\n>\n" for w in result["warnings"]) + "\n"
+        head, sep, rest = body.partition("\n")
+        with open(md, "w", encoding="utf-8") as fh:
+            fh.write(head + "\n\n" + banner + rest)
+    hp = os.path.join(outdir, "report.html")
+    engine.write_html_report(result, hp)
+    if result.get("warnings"):
+        import html as _h
+        with open(hp, encoding="utf-8") as fh:
+            page = fh.read()
+        box = ('<div style="background:#fff3cd;border:2px solid #d39e00;padding:12px;margin:12px 0;font-weight:bold">'
+               + "<br>".join("WARNING: " + _h.escape(w) for w in result["warnings"]) + "</div>")
+        page = page.replace('<div class="wrap">', '<div class="wrap">' + box, 1)
+        with open(hp, "w", encoding="utf-8") as fh:
+            fh.write(page)
 
 
 def _rules(args, target: str) -> List[triage.IgnoreRule]:
@@ -110,6 +127,7 @@ def _scan_triaged(path: str, args, rules, tmp: str, keep: bool = False) -> Dict[
         die(str(e), 1)
     except Exception as e:
         die(f"unexpected failure while scanning '{path}': {type(e).__name__}: {e}", 1)
+    res["warnings"] = info_mod.coverage_warnings(res)
     if getattr(args, "no_triage", False):
         res["findings"] = [dict(f, fingerprint=triage._fp(f)) for f in res["findings"]]
         return res
@@ -148,6 +166,9 @@ def cmd_scan(a):
         print(f"Baseline written to {a.write_baseline}")
 
     write_reports(result, outdir)
+    if result.get("warnings") and a.format != "json":
+        for w in result["warnings"]:
+            print(Term.c("WARNING: " + w, "bold"), file=sys.stderr)
     if a.format == "json":
         print(json.dumps(result, indent=2, default=str))
     elif not a.quiet:

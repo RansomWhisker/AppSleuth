@@ -82,3 +82,21 @@ class Thresholds(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CoverageWarnings(unittest.TestCase):
+    def test_encrypted_main_binary_warns(self):
+        from appsleuth import info
+        r = result("ipa", [], {"macho_encryption_verified": [{"verdict": "ciphertext"}]})
+        self.assertIn("main binary is still FairPlay-encrypted", info.coverage_warnings(r)[0])
+
+    def test_decrypted_is_silent(self):
+        from appsleuth import info
+        r = result("ipa", [], {"macho_encryption_verified": [{"verdict": "decrypted"}],
+                               "embedded_binaries_still_encrypted": []})
+        self.assertEqual(info.coverage_warnings(r), [])
+
+    def test_embedded_listed(self):
+        from appsleuth import info
+        r = result("ipa", [], {"embedded_binaries_still_encrypted": ["Frameworks/X.framework/X"]})
+        self.assertIn("X.framework", info.coverage_warnings(r)[0])

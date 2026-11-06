@@ -2,7 +2,7 @@
 
 > A tool by [**rudranetra.com**](https://rudranetra.com) · more at [rudranetra.com/tools](https://rudranetra.com/tools)
 
-One tool for mobile app security triage. Works on **IPA**, **APK**, **APKS/XAPK** and **AAB**. Python standard library only.
+One tool for mobile app security triage. Works on macOS, Linux and Windows (device pulls on Windows are experimental). Analyses **IPA**, **APK**, **APKS/XAPK** and **AAB**. Python standard library only.
 
 | Command | What it does |
 |---|---|
@@ -29,6 +29,8 @@ One tool for mobile app security triage. Works on **IPA**, **APK**, **APKS/XAPK*
     appsleuth data --audit-dir ./pulled --platform android
 
 Reports (`report.json/md/html`) are written to `-o DIR`.
+
+**Encrypted IPAs:** if the main binary (or a framework) is still FairPlay-encrypted, AppSleuth cannot see its code, so it prints a warning and puts it at the top of every report. A clean result on such a file does not mean the app is secure; re-dump it decrypted and scan again.
 
 ## Keeping false positives low
 

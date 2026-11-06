@@ -58,6 +58,7 @@ def summarize(result: Dict[str, Any], path: Optional[str] = None) -> Dict[str, A
         "file": file_digests(path or result.get("input_file")) if (path or result.get("input_file")) and
                 os.path.isfile(path or result.get("input_file")) else {},
         "flags": _flags(findings),
+        "warnings": coverage_warnings(result),
     }
 
     if kind == "ipa":
@@ -126,8 +127,27 @@ def _kv(lines: List[str], label: str, value: Any):
     lines.append(f"  {label:<18}{value}")
 
 
+def coverage_warnings(result: Dict[str, Any]) -> List[str]:
+    """Conditions under which the scan could not see the app's real code, so a clean
+    result must not be read as 'secure'."""
+    meta = result.get("meta", {}) or {}
+    out: List[str] = []
+    verified = meta.get("macho_encryption_verified") or []
+    if any(isinstance(e, dict) and e.get("verdict") == "ciphertext" for e in verified):
+        out.append("The main binary is still FairPlay-encrypted. Its code and strings were NOT scanned, "
+                   "so this result is incomplete. Re-dump the app decrypted (e.g. getipa --decrypted) and scan again.")
+    bad = meta.get("embedded_binaries_still_encrypted") or []
+    if bad:
+        out.append("Still-encrypted embedded binaries were not scanned: " + ", ".join(bad[:6]) + (" ..." if len(bad) > 6 else ""))
+    return out
+
+
 def render_text(s: Dict[str, Any], *, full: bool = False) -> str:
     L: List[str] = []
+    for w in s.get("warnings") or []:
+        L.append(f"!! WARNING: {w}")
+    if s.get("warnings"):
+        L.append("")
     title = s.get("name") or s.get("id") or "?"
     L.append(f"{title}  ({s.get('id')})" if title != s.get("id") else title)
     L.append("=" * min(78, len(L[0])))
