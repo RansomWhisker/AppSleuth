@@ -65,5 +65,9 @@ if __name__ == "__main__":
 
 class SplitAbis(unittest.TestCase):
     def test_abis_from_split_apk_prefixed_names(self):
-        a = _app("android", {"split1_split_config_arm64_v8a_apk:lib/arm64-v8a/libfoo.so": b"\x7fELF"})
+        # two unpacked splits -> App.rel() labels files "split1_...:lib/...", as for a real .apks
+        a = _app("android", {"split0_base_apk/AndroidManifest.xml": b"",
+                             "split1_split_config_arm64_v8a_apk/lib/arm64-v8a/libfoo.so": b"\x7fELF"})
+        a.roots = [os.path.join(a.workdir, "split0_base_apk"), os.path.join(a.workdir, "split1_split_config_arm64_v8a_apk")]
+        self.assertTrue(any(":lib/" in a.rel(p) for p in a.files()))
         self.assertEqual(techstack.detect(a)["toolchain"].get("abis"), ["arm64-v8a"])

@@ -153,7 +153,16 @@ _NAME_MAX = 200          # bytes per path component (APFS/ext4 allow 255)
 _PATH_MAX = 900          # whole relative path
 
 
+_WIN = os.name == "nt"
+_WIN_BAD = re.compile(r'[<>:"|?*\x00-\x1f]')
+_WIN_RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
+
+
 def _short(component: str) -> str:
+    if _WIN:      # names Windows cannot create (':' '?' '*', CON, aux.xml, trailing dot / space)
+        component = _WIN_BAD.sub("_", component).rstrip(" .") or "_"
+        if component.split(".", 1)[0].lower() in _WIN_RESERVED:
+            component = "_" + component
     if len(component.encode("utf-8", "surrogateescape")) <= _NAME_MAX:
         return component
     h = hashlib.sha1(component.encode("utf-8", "surrogateescape")).hexdigest()[:10]
@@ -176,6 +185,8 @@ def _safe_extractall(z: "zipfile.ZipFile", dest: str):
         raise ValueError("archive expands beyond the size limit (possible zip bomb)")
     dest = os.path.realpath(dest)
     os.makedirs(dest, exist_ok=True)
+    # Windows without long-path support stops at 260 characters for the whole path
+    path_max = max(60, 240 - len(dest)) if _WIN else _PATH_MAX
     files: Dict[str, str] = {}       # casefolded rel path -> actual rel path (files)
     dirs: Dict[str, str] = {}        # casefolded rel path -> actual rel path (directories)
     skipped: List[str] = []
@@ -215,9 +226,10 @@ def _safe_extractall(z: "zipfile.ZipFile", dest: str):
         parts = [p for p in parts if p]
         if not parts:
             continue
-        if len("/".join(parts).encode("utf-8", "surrogateescape")) > _PATH_MAX:
+        if len("/".join(parts).encode("utf-8", "surrogateescape")) > path_max:
+            stem, ext = os.path.splitext(parts[-1])          # keep the extension: scanners key on it
             parts = ["_long_paths", hashlib.sha1(raw.encode("utf-8", "surrogateescape")).hexdigest()[:12]
-                     + "_" + parts[-1]]
+                     + "_" + stem[:30] + (ext if len(ext) <= 16 else "")]
         is_dir = raw.endswith("/")
         rel = place(parts, is_dir)
         target = os.path.join(dest, *rel)
