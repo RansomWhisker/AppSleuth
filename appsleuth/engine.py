@@ -890,6 +890,12 @@ def _classify_secret(name: str, token: bytes, blob: bytes, pos: int):
     if _PLACEHOLDER_RE.search(token) or token.upper().endswith(b"EXAMPLE"):
         return None
     if name == "AWS Access Key ID":
+        before = blob[pos - 1:pos] if pos else b""
+        after = blob[pos + len(token): pos + len(token) + 1]
+        if re.match(rb"[A-Za-z0-9+/_-]", before) or re.match(rb"[A-Za-z0-9+/_=-]", after):
+            return None          # a slice of a longer base32/base64 run (cached asset, blob), not a key
+        if _shannon_entropy(token[4:].decode("ascii", "replace")) < 3.0:
+            return None          # e.g. AAAAAAAAAAAAAAAA; real key IDs are random
         window = blob[max(0, pos - 300): pos + len(token) + 300]
         paired = any(c != token for c in re.findall(rb'(?<![A-Za-z0-9/+=])[A-Za-z0-9/+=]{40}(?![A-Za-z0-9/+=])', window))
         if paired:

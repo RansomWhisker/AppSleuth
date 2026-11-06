@@ -30,6 +30,13 @@ class SecretClassification(unittest.TestCase):
     def test_aws_key_alone_is_medium_not_high(self):
         self.assertEqual(secrets(b"AKIAQWERTYUIOPASDFGH"), [("MEDIUM", "AWS Access Key ID embedded (no secret key found alongside)")])
 
+    def test_aws_lookalike_inside_long_run_dropped(self):
+        self.assertEqual(secrets(b"ZZAAAAKIABIAAAAJAAAAIAAAJAAAA"), [])
+        self.assertEqual(secrets(b"x=AKIAAAAAAAAAAAAAAAAA;"), [])         # low-entropy filler
+
+    def test_aws_key_delimited_still_found(self):
+        self.assertEqual(secrets(b'"AKIAQWERTYUIOPASDFGH"')[0][0], "MEDIUM")
+
     def test_aws_key_pair_is_high(self):
         out = secrets(b"AKIAQWERTYUIOPASDFGH\x00wJalrXUtnFEMI/K7MDENG/bPxRfiCYzQWERTYUIO")
         self.assertEqual(out[0][0], "HIGH")
