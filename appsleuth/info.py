@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from . import engine
 from .style import Term, bad, dim, good, head, warn
+from . import perms as perms_mod
 
 # Boolean "posture" flags, derived from findings so that scan, info and diff all agree.
 FLAG_TITLES = {
@@ -132,7 +133,7 @@ def _enc_plain(verdicts: List[str]) -> str:
     if "flag-set-but-readable" in verdicts:
         return warn("FairPlay flag set but code is readable (decrypted dump)")
     if "decrypted" in verdicts:
-        return good("not encrypted") + dim(": code is readable (FairPlay removed, e.g. a decrypted dump)")
+        return good("not encrypted") + dim(": code is readable (FairPlay removed)")
     return "unknown"
 
 
@@ -233,15 +234,21 @@ def protection_lines(s: Dict[str, Any], *, full: bool = False) -> List[str]:
                     + ("   " + bad("FairPlay-encrypted") if m.get("encrypted") else ""))
             pie_bad = sum(1 for r in rows if r.get("main") and r.get("pie") is False)
             can_bad = [r for r in rows if r.get("canary") is False and not r.get("swift")]
-            _kv(L, "Stack canary", (good("all") if not can_bad else warn(f"missing in {len(can_bad)} of {len(rows)}")) + dim("  (heuristic; Swift code is excluded)"))
-            _kv(L, "Executable stack", bad(f"{sum(1 for r in rows if r.get('exec_stack'))} binaries") if any(r.get("exec_stack") for r in rows) else good("none"))
+            _kv(L, "Missing canary", (warn if can_bad else good)(f"{len(can_bad)} of {len(rows)} binaries") + dim("  (heuristic; Swift code is excluded)"))
+            n = len(rows)
+            ex = sum(1 for r in rows if r.get("exec_stack"))
+            _kv(L, "Executable stack", (bad if ex else good)(f"{ex} of {n} binaries") + dim("  (0 is good)" if not ex else ""))
             enc = [r for r in rows if r.get("encrypted")]
-            _kv(L, "Still encrypted", warn(", ".join(r["name"].rsplit("/", 1)[-1] for r in enc[:5])) if enc else good("none"))
+            _kv(L, "Still encrypted", (warn if enc else good)(f"{len(enc)} of {n} binaries")
+                + (dim("  " + ", ".join(r["name"].rsplit("/", 1)[-1] for r in enc[:5])) if enc else dim("  (0 is good: all code is readable)")))
         else:
-            _kv(L, "No RELRO", bad(str(sum(1 for r in rows if r.get("relro") == "none"))) if any(r.get("relro") == "none" for r in rows) else good("none"))
-            _kv(L, "Executable stack", bad(str(sum(1 for r in rows if r.get("nx") is False))) if any(r.get("nx") is False for r in rows) else good("none"))
+            n = len(rows)
+            nr = sum(1 for r in rows if r.get("relro") == "none")
+            nx = sum(1 for r in rows if r.get("nx") is False)
             can = sum(1 for r in rows if r.get("canary") is False)
-            _kv(L, "Stack canary", good("all") if not can else warn(f"missing in {can} of {len(rows)}"))
+            _kv(L, "Missing RELRO", (bad if nr else good)(f"{nr} of {n} libraries") + dim("  (0 is good)" if not nr else ""))
+            _kv(L, "Executable stack", (bad if nx else good)(f"{nx} of {n} libraries") + dim("  (0 is good)" if not nx else ""))
+            _kv(L, "Missing canary", (warn if can else good)(f"{can} of {n} libraries") + dim("  (heuristic)"))
         if weak:
             L.append("  " + dim("Binaries with issues:"))
             for r in weak[: (len(weak) if full else 6)]:
@@ -320,28 +327,9 @@ def render_text(s: Dict[str, Any], *, full: bool = False) -> str:
     L.extend(protection_lines(s, full=full))
 
     perms = s.get("permissions") or []
-    L.append("")
     if s["platform"] == "ios":
-        L.append(f"Permissions requested ({len(perms)})")
-        purposes = s.get("permission_purposes") or {}
-        for p in perms[: (len(perms) if full else 12)]:
-            L.append(f"  {p}: {str(purposes.get(p, ''))[:70]}")
-    else:
-        dang = set(s.get("dangerous_permissions") or [])
-        L.append(f"Permissions ({len(perms)}, {len(dang)} dangerous)")
-        for p in perms[: (len(perms) if full else 15)]:
-            L.append(f"  {warn('!') if p in dang else ' '} {warn(p) if p in dang else p}")
-    if not full and len(perms) > 15:
-        L.append(f"  … {len(perms) - 15} more (use --full)")
-
-    if s["platform"] == "ios":
-        ents = s.get("entitlements") or {}
-        if ents:
-            L.append("")
-            L.append(f"Entitlements ({len(ents)})")
-            for k in sorted(ents)[: (len(ents) if full else 12)]:
-                v = ents[k]
-                L.append(f"  {k}: {str(v)[:70]}")
+        L.extend(perms_mod.ios_permission_lines(perms, s.get("permission_purposes") or {}, full=full))
+        L.extend(perms_mod.ios_entitlement_lines(s.get("entitlements") or {}, full=full))
         _kv(L, "URL schemes", ", ".join(s.get("url_schemes") or []))
         _kv(L, "Associated domains", ", ".join(s.get("associated_domains") or []))
         ats = s.get("ats")
@@ -349,6 +337,7 @@ def render_text(s: Dict[str, Any], *, full: bool = False) -> str:
         L.append("App Transport Security (ATS)")
         L.extend(ats_lines(ats))
     else:
+        L.extend(perms_mod.android_permission_lines(perms, s.get("dangerous_permissions") or [], full=full))
         comps = [c for c in (s.get("exported_components") or []) if not c.get("launcher")]
         L.append("")
         L.append(f"Exported components ({len(comps)})")

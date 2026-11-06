@@ -205,3 +205,30 @@ class InfoAtsAndProtection(unittest.TestCase):
         from appsleuth import info
         self.assertIn("NOT readable", info._enc_plain(["ciphertext"]))
         self.assertIn("not encrypted", info._enc_plain(["decrypted"]))
+
+
+class ReadablePermissions(unittest.TestCase):
+    def test_ios_sorted_by_risk_and_wrapped(self):
+        from appsleuth import perms
+        out = "\n".join(perms.ios_permission_lines(
+            ["NSFaceIDUsageDescription", "NSContactsUsageDescription"],
+            {"NSFaceIDUsageDescription": "x" * 300, "NSContactsUsageDescription": ""}))
+        self.assertLess(out.index("Contacts"), out.index("Face ID"))
+        self.assertIn("no purpose text", out)
+
+    def test_unknown_key_gets_readable_name(self):
+        from appsleuth import perms
+        self.assertEqual(perms.ios_friendly("NSGizmoScannerUsageDescription")[0], "Gizmo Scanner")
+
+    def test_debuggable_entitlement_flagged(self):
+        from appsleuth import perms
+        out = "\n".join(perms.ios_entitlement_lines({"get-task-allow": True, "aps-environment": "development"}))
+        self.assertIn("debuggable", out)
+        self.assertIn("sandbox", out)
+
+    def test_android_dangerous_first_with_friendly_names(self):
+        from appsleuth import perms
+        out = "\n".join(perms.android_permission_lines(
+            ["android.permission.INTERNET", "android.permission.READ_SMS"], ["android.permission.READ_SMS"]))
+        self.assertIn("Read SMS", out)
+        self.assertLess(out.index("Read SMS"), out.index("INTERNET"))
