@@ -316,6 +316,9 @@ def cmd_runtime(a):
         die(str(e), 2)
     except Exception as e:      # frida raises its own error types
         hint = ""
+        if runtime.looks_like_version_mismatch(e):
+            import frida  # type: ignore
+            die(runtime.mismatch_hint(getattr(frida, "__version__", "?")), 2)
         if type(e).__name__ == "TimedOutError":
             hint = " (the app did not start under Frida; launch it by hand and run again without --spawn)"
         die(f"runtime probe failed: {type(e).__name__}: {e}{hint}", 1)

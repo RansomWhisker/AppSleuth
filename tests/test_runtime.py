@@ -79,3 +79,36 @@ class RuntimeFalsePositives(unittest.TestCase):
               {"t": "prefs_write", "key": "authToken", "value": "0123456789abcdef0123456789abcdef"}]
         sev = {f["evidence"].split(":")[0]: f["severity"] for f in runtime.events_to_result(ev, "android", "x")["findings"]}
         self.assertEqual(sev, {"session_id": "LOW", "authToken": "HIGH"})
+
+
+class NewHooks(unittest.TestCase):
+    def test_permissive_hostname_verifier_high(self):
+        t, _ = titles([{"t": "hostname_verifier", "cls": "com.x.AllowAllHostnameVerifier"}])
+        self.assertEqual(t[0][0], "HIGH")
+
+    def test_normal_verifier_info(self):
+        t, _ = titles([{"t": "hostname_verifier", "cls": "okhttp3.internal.tls.OkHostnameVerifier"}])
+        self.assertEqual(t[0][0], "INFO")
+
+    def test_cronet_cleartext_reported(self):
+        t, _ = titles([{"t": "cleartext", "url": "http://api.shopfront-app.io/v1", "via": "cronet"}])
+        self.assertEqual(t[0][0], "MEDIUM")
+
+    def test_ios_early_exit_noted_not_bypassed(self):
+        t, r = titles([{"t": "early_exit", "reason": "process-terminated"}], platform="ios")
+        self.assertEqual(t[0][0], "INFO")
+        self.assertIn("does not", r["findings"][0]["detail"])
+
+    def test_early_exit_ignored_on_android(self):
+        self.assertEqual(titles([{"t": "early_exit"}])[0], [])
+
+
+class VersionMismatch(unittest.TestCase):
+    def test_detects_protocol_error(self):
+        class ProtocolError(Exception):
+            pass
+        self.assertTrue(runtime.looks_like_version_mismatch(ProtocolError("unexpected message")))
+        self.assertFalse(runtime.looks_like_version_mismatch(RuntimeError("device not found")))
+
+    def test_hint_names_version(self):
+        self.assertIn("17.12.0", runtime.mismatch_hint("17.12.0"))
