@@ -121,6 +121,44 @@ def summarize(result: Dict[str, Any], path: Optional[str] = None) -> Dict[str, A
 
 # ------------------------------------------------------------------ rendering
 
+def _yn(v: Any, yes: str, no: str):
+    return None if v is None else (yes if v else no)
+
+
+def _enc_plain(verdicts: List[str]) -> str:
+    if "ciphertext" in verdicts:
+        return "FairPlay-encrypted: the code is NOT readable here (scan coverage limited)"
+    if "flag-set-but-readable" in verdicts:
+        return "FairPlay flag set but code is readable (decrypted dump)"
+    if "decrypted" in verdicts:
+        return "not encrypted: code is readable (FairPlay removed, e.g. a decrypted dump)"
+    return "unknown"
+
+
+def ats_lines(ats: Dict[str, Any]) -> List[str]:
+    """ATS settings with their values; the key alone says nothing (NSAllowsArbitraryLoads can be false)."""
+    if not ats:
+        return ["  ENFORCED (no ATS overrides; HTTPS with modern TLS required)"]
+    off = bool(ats.get("NSAllowsArbitraryLoads"))
+    web = bool(ats.get("NSAllowsArbitraryLoadsInWebContent"))
+    if off:
+        verdict = "DISABLED globally (NSAllowsArbitraryLoads = true)"
+    elif web:
+        verdict = "ENFORCED for the app, but disabled for web content"
+    else:
+        verdict = "ENFORCED" + (" (with exceptions)" if ats.get("NSExceptionDomains") else "")
+    out = [f"  Status            {verdict}"]
+    for k in sorted(ats):
+        v = ats[k]
+        if k == "NSExceptionDomains" and isinstance(v, dict):
+            for dom, rules in sorted(v.items()):
+                bad = isinstance(rules, dict) and rules.get("NSExceptionAllowsInsecureHTTPLoads")
+                out.append(f"  Exception         {dom}" + ("  (plaintext HTTP allowed)" if bad else ""))
+        else:
+            out.append(f"  {k}: {v}")
+    return out
+
+
 def _kv(lines: List[str], label: str, value: Any):
     if value in (None, "", [], {}):
         return
@@ -176,6 +214,7 @@ def render_text(s: Dict[str, Any], *, full: bool = False) -> str:
         if enc:
             verdicts = sorted({e.get("verdict", "?") for e in enc if isinstance(e, dict)})
             _kv(L, "Main binary", ", ".join(verdicts))
+            _kv(L, "Encryption", _enc_plain(verdicts))
         _kv(L, "Still encrypted", ", ".join(s.get("embedded_binaries_still_encrypted") or []) or None)
     else:
         _kv(L, "Schemes", ", ".join(sg.get("schemes") or []))
@@ -183,6 +222,15 @@ def render_text(s: Dict[str, Any], *, full: bool = False) -> str:
             _kv(L, "Cert SHA-256", fp)
         for subj in sg.get("subjects") or []:
             _kv(L, "Subject", subj)
+
+    if s["platform"] == "ios":
+        hd = s.get("hardening") or {}
+        if hd:
+            L.append("")
+            L.append("Binary protection")
+            _kv(L, "PIE (ASLR)", _yn(hd.get("pie"), "yes", "NO - fixed load address"))
+            _kv(L, "Stack canary", _yn(hd.get("stack_canary_symbol"), "yes", "not found (heuristic)"))
+            _kv(L, "Exec. stack", "ALLOWED" if hd.get("allow_stack_execution") else "no")
 
     L.append("")
     L.append("Posture")
@@ -218,7 +266,9 @@ def render_text(s: Dict[str, Any], *, full: bool = False) -> str:
         _kv(L, "URL schemes", ", ".join(s.get("url_schemes") or []))
         _kv(L, "Associated domains", ", ".join(s.get("associated_domains") or []))
         ats = s.get("ats")
-        _kv(L, "ATS", "default" if not ats else ", ".join(sorted(ats)))
+        L.append("")
+        L.append("App Transport Security (ATS)")
+        L.extend(ats_lines(ats))
     else:
         comps = [c for c in (s.get("exported_components") or []) if not c.get("launcher")]
         L.append("")

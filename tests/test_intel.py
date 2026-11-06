@@ -190,3 +190,18 @@ class SbomUserAgent(unittest.TestCase):
         self.assertFalse([n for n in names if n[1].startswith("1.")])
         old = {(c["name"], c["version"]) for c in self.comps(b"okhttp/2.7.5")}
         self.assertEqual(old, {("com.squareup.okhttp:okhttp", "2.7.5")})
+
+
+class InfoAtsAndProtection(unittest.TestCase):
+    def test_ats_shows_values(self):
+        from appsleuth import info
+        self.assertIn("DISABLED", "\n".join(info.ats_lines({"NSAllowsArbitraryLoads": True})))
+        off = "\n".join(info.ats_lines({"NSAllowsArbitraryLoads": False}))
+        self.assertIn("ENFORCED", off)
+        self.assertIn("False", off)
+        self.assertIn("ENFORCED", info.ats_lines({})[0])
+
+    def test_encryption_plain_language(self):
+        from appsleuth import info
+        self.assertIn("NOT readable", info._enc_plain(["ciphertext"]))
+        self.assertIn("not encrypted", info._enc_plain(["decrypted"]))
