@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 
 from . import __version__, diff as diff_mod, engine, info as info_mod, triage
 
-COMMANDS = ("scan", "info", "diff", "data", "version")
+COMMANDS = ("scan", "info", "diff", "data", "runtime", "version")
 _SEV_RANK = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3}
 
 
@@ -248,6 +248,29 @@ def cmd_diff(a):
 
 # ------------------------------------------------------------------------ data
 
+def cmd_runtime(a):
+    from . import runtime
+    platform = "ios" if a.ios else "android"
+    print(f"[*] Attaching to {a.target} on {platform} for {a.seconds}s. Use the app now "
+          "(log in, browse, trigger network calls); Ctrl+C ends early.", file=sys.stderr)
+    try:
+        events = runtime.run_probe(platform, a.target, seconds=a.seconds, spawn=a.spawn,
+                                   device_id=a.device, host=a.frida_host)
+    except RuntimeError as e:
+        die(str(e), 2)
+    except Exception as e:      # frida raises its own error types
+        die(f"runtime probe failed: {type(e).__name__}: {e}", 1)
+    res = runtime.events_to_result(events, platform, a.target)
+    res = triage.apply(res, rules=_rules(a, a.target), min_severity=a.min_severity, corroborate=False)
+    out = a.outdir or f"runtime_{a.target}"
+    write_reports(res, out, "Runtime probe")
+    print(f"\n{_counts(res['summary'])}   ({res['meta']['events']} events observed)")
+    print_findings(res, verbose=a.verbose, show=a.show)
+    if res["meta"]["events"] == 0:
+        print("No events were observed. Is frida-server running, and did you use the app during the window?")
+    print(f"Reports: {out}/report.html  report.md  report.json")
+
+
 def cmd_data(a):
     from . import dataaudit, devdata
 
@@ -425,6 +448,21 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--ignore-file")
     g.add_argument("--min-severity", choices=["INFO", "LOW", "MEDIUM", "HIGH"])
     g.set_defaults(fn=cmd_data)
+    r = sub.add_parser("runtime", help="EXPERIMENTAL: observe a running app with Frida (root checks, cleartext, ciphers, secrets)")
+    plat = r.add_mutually_exclusive_group(required=True)
+    plat.add_argument("--android", action="store_true")
+    plat.add_argument("--ios", action="store_true")
+    r.add_argument("target", help="package name (Android) or bundle id (iOS)")
+    r.add_argument("--seconds", type=int, default=60, help="observation window (default 60)")
+    r.add_argument("--spawn", action="store_true", help="launch the app fresh instead of attaching to a running one")
+    r.add_argument("--device", help="Frida device id (default: USB)")
+    r.add_argument("--frida-host", help="connect to frida-server over the network at HOST[:PORT]")
+    r.add_argument("-o", "--outdir")
+    r.add_argument("--show", choices=["HIGH", "MEDIUM", "LOW", "INFO"], default="LOW")
+    r.add_argument("-v", "--verbose", action="store_true")
+    r.add_argument("--ignore-file")
+    r.add_argument("--min-severity", choices=["INFO", "LOW", "MEDIUM", "HIGH"])
+    r.set_defaults(fn=cmd_runtime)
     return ap
 
 

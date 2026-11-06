@@ -11,11 +11,17 @@ requires-python = ">=3.9"
 license = { text = "MIT" }
 dependencies = []
 
+[project.optional-dependencies]
+runtime = ["frida>=16"]
+
 [project.scripts]
 appsleuth = "appsleuth.cli:main"
 
 [tool.setuptools]
 packages = ["appsleuth"]
+
+[tool.setuptools.package-data]
+appsleuth = ["runtime_js/*.js"]
 
 [project.urls]
 Homepage = "https://rudranetra.com/tools"

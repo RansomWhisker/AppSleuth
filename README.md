@@ -32,6 +32,16 @@ Reports (`report.json/md/html`) are written to `-o DIR`.
 
 **Encrypted IPAs:** if the main binary (or a framework) is still FairPlay-encrypted, AppSleuth cannot see its code, so it prints a warning and puts it at the top of every report. A clean result on such a file does not mean the app is secure; re-dump it decrypted and scan again.
 
+## `appsleuth runtime` (experimental)
+
+Observe what a running app really does, using Frida: root/jailbreak checks, plaintext HTTP actually requested, ciphers (ECB, DES), credentials written to SharedPreferences/NSUserDefaults, secrets in logs, debuggable WebViews.
+
+    pip install "appsleuth[runtime]"          # adds Frida; frida-server must run on the device
+    appsleuth runtime --android com.example.app --seconds 90
+    appsleuth runtime --ios com.example.app --spawn
+
+It is **observe-only** (no bypasses, nothing patched) and never stores values, only key names and descriptions. Use the app during the window: it can only report what it sees. **Status: new, and so far tested only on simulated events, not on a real device.** Treat results as leads.
+
 ## Keeping false positives low
 
 * **At detection**: placeholder and sample secrets dropped; public client identifiers (Google API keys, OAuth client IDs, Razorpay key IDs) reported as INFO; JWTs must decode; PEM needs a real body; whole-word crypto matching; digests, UUIDs and identifiers filtered from the entropy scan; documentation/schema URLs ignored; launcher activities not "exported"; Swift binaries not flagged for stack canaries.
