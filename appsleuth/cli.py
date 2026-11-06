@@ -460,7 +460,7 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--no-triage", action="store_true", help="raw engine output, no false-positive layer")
 
     s = sub.add_parser("scan", help="static security scan of an app (or a directory of apps)")
-    s.add_argument("target", help=".apk .apks .xapk .aab .ipa, or a directory (batch)")
+    s.add_argument("target", help=".apk .apks .xapk .apkm .aab .ipa .tipa, or a directory (batch)")
     s.add_argument("-o", "--outdir")
     s.add_argument("--recursive", action="store_true", help="batch: recurse into subdirectories")
     s.add_argument("--keep-extracted", action="store_true", help="keep the unpacked app in <outdir>/extracted")
@@ -581,3 +581,12 @@ def main(argv: Optional[List[str]] = None):
     except KeyboardInterrupt:
         print("\ninterrupted", file=sys.stderr)
         sys.exit(130)
+    except SystemExit:
+        raise
+    except Exception as e:          # any command, any input: a clean message instead of a traceback
+        if os.environ.get("APPSLEUTH_DEBUG"):
+            raise
+        if isinstance(e, ValueError):
+            die(str(e), 1)
+        die(f"unexpected failure: {type(e).__name__}: {e}  (set APPSLEUTH_DEBUG=1 for the traceback; "
+            f"please report it at https://github.com/RansomWhisker/AppSleuth/issues)", 1)

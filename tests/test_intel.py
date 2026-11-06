@@ -204,7 +204,7 @@ class InfoAtsAndProtection(unittest.TestCase):
     def test_encryption_plain_language(self):
         from appsleuth import info
         self.assertIn("NOT readable", info._enc_plain(["ciphertext"]))
-        self.assertIn("not encrypted", info._enc_plain(["decrypted"]))
+        self.assertIn("decrypted dump", info._enc_plain(["decrypted"]))
 
 
 class ReadablePermissions(unittest.TestCase):

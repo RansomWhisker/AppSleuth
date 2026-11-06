@@ -133,7 +133,7 @@ def _enc_plain(verdicts: List[str]) -> str:
     if "flag-set-but-readable" in verdicts:
         return warn("FairPlay flag set but code is readable (decrypted dump)")
     if "decrypted" in verdicts:
-        return good("not encrypted") + dim(": code is readable (FairPlay removed)")
+        return "decrypted dump" + dim(": FairPlay (App Store DRM) removed, so the code could be scanned")
     return "unknown"
 
 
@@ -244,7 +244,7 @@ CHECK_TYPES = [
 
 LOC_LIMIT = 30     # lines per indicator in the text view; --json carries every record
 
-_KIND_TAG = {"java-method": "java method", "java-class": "java class", "objc-method": "objc method",
+_KIND_TAG = {"java-method": "java method", "java-class": "java class", "java-field": "java field", "java-string": "dex string", "objc-method": "objc method",
              "objc-class": "objc class", "native-function": "native func", "native-symbol": "symbol",
              "native-string": "string", "native-import": "import", "file-string": "file"}
 
@@ -421,8 +421,12 @@ def protection_lines(s: Dict[str, Any], *, full: bool = False) -> List[str]:
             ex = sum(1 for r in rows if r.get("exec_stack"))
             _kv(L, "Executable stack", (bad if ex else good)(f"{ex} of {n} binaries") + dim("  (0 is good)" if not ex else ""))
             enc = [r for r in rows if r.get("encrypted")]
-            _kv(L, "Still encrypted", (warn if enc else good)(f"{len(enc)} of {n} binaries")
-                + (dim("  " + ", ".join(r["name"].rsplit("/", 1)[-1] for r in enc[:5])) if enc else dim("  (0 is good: all code is readable)")))
+            # FairPlay is Apple's App Store DRM, not a protection the developer chose: every App Store build is encrypted
+            # on the device, and 0 here only means this copy is a decrypted dump. Not a weakness of the app, so no
+            # good/bad colour; still-encrypted binaries matter only because their code could not be scanned.
+            _kv(L, "Still encrypted", (warn(f"{len(enc)} of {n} binaries") if enc else f"0 of {n} binaries")
+                + (dim("  not scanned: " + ", ".join(r["name"].rsplit("/", 1)[-1] for r in enc[:5])) if enc
+                   else dim("  (decrypted dump: all code was scanned; FairPlay is App Store DRM, not an app weakness)")))
         else:
             n = len(rows)
             nr = sum(1 for r in rows if r.get("relro") == "none")

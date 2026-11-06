@@ -46,14 +46,18 @@ MAX_CLASS_METHODS = 40
 
 class Macho:
     def __init__(self, data: bytes):
+        self.slice = None            # "arm64" / "arm64e" when picked out of a fat binary
         if data[:4] in (b"\xca\xfe\xba\xbe",):
             n = struct.unpack_from(">I", data, 4)[0]
-            pick = None
-            for i in range(n):
-                ct, _cs, off, size, _al = struct.unpack_from(">5I", data, 8 + i * 20)
-                if pick is None or ct == CPU_ARM64:
-                    pick = (off, size)
+            pick, rank = None, -1
+            for i in range(min(n, 16)):
+                ct, cs, off, size, _al = struct.unpack_from(">5I", data, 8 + i * 20)
+                # arm64 and arm64e share the cputype; prefer plain arm64 (subtype 0), then arm64e, then anything
+                r = 2 if ct == CPU_ARM64 and cs & 0xff == 0 else 1 if ct == CPU_ARM64 else 0
+                if r > rank:
+                    pick, rank = (off, size, "arm64" if r == 2 else "arm64e" if r == 1 else None), r
             data = data[pick[0]:pick[0] + pick[1]]
+            self.slice = pick[2] if n > 1 else None
         if data[:4] != b"\xcf\xfa\xed\xfe":
             raise ValueError("not a 64-bit little-endian Mach-O")
         self.d = data
@@ -65,6 +69,7 @@ class Macho:
         self.indirect_off = self.nindirect = 0
         self.fstarts_off = self.fstarts_size = 0
         self.chained = None
+        self.exports = (0, 0)
         self.encrypted = False
         self.base = 0
         off = 32
@@ -81,8 +86,11 @@ class Macho:
                     sn = data[so:so + 16].split(b"\0")[0].decode()
                     sg = data[so + 16:so + 32].split(b"\0")[0].decode()
                     addr, ssz, soff, _al, _ro, _nr, flags, r1, r2, _r3 = struct.unpack_from("<QQIIIIIIII", data, so + 32)
+                    # bytes actually present in the file: zero-fill sections (__bss, __common, thread-local
+                    # zero-fill) have none, and a truncated / thinned binary may end early
+                    fsz = 0 if (flags & 0xff) in (0x1, 0xc, 0x12) else max(0, min(ssz, len(data) - soff))
                     self.secs.append({"name": sn, "seg": sg, "addr": addr, "size": ssz, "off": soff,
-                                      "type": flags & 0xff, "r1": r1, "r2": r2})
+                                      "fsize": fsz, "type": flags & 0xff, "r1": r1, "r2": r2})
             elif cmd == 2:
                 self.symoff, self.nsyms, self.stroff, self.strsize = struct.unpack_from("<IIII", data, off + 8)
             elif cmd == 0xb:
@@ -93,6 +101,10 @@ class Macho:
                 self.fstarts_off, self.fstarts_size = struct.unpack_from("<II", data, off + 8)
             elif cmd == 0x80000034:
                 self.chained = struct.unpack_from("<II", data, off + 8)
+            elif cmd == 0x80000033:
+                self.exports = struct.unpack_from("<II", data, off + 8)
+            elif cmd in (0x22, 0x80000022) and not self.exports[0]:
+                self.exports = struct.unpack_from("<II", data, off + 40)
             off += size
         self.fmt = self._chain_format()
         self.syms = self._symbols()
@@ -184,6 +196,56 @@ class Macho:
             strx, ty, sect, _desc, val = struct.unpack_from("<IBBHQ", self.d, self.symoff + i * 16)
             e = self.d.find(b"\0", self.stroff + strx)
             out.append((self.d[self.stroff + strx:e].decode("latin-1"), val, ty, sect))
+        # exported symbols the symbol table was stripped of still live in the dyld exports trie
+        have = {n for n, _v, _t, _s in out}
+        for name, val in self._export_trie():
+            if name not in have:
+                sect = next((k + 1 for k, x in enumerate(self.secs) if x["addr"] <= val < x["addr"] + x["size"]), 0)
+                if sect:
+                    out.append((name, val, 0x0f, sect))
+        return out
+
+    def _export_trie(self) -> List[Tuple[str, int]]:
+        off, size = self.exports
+        if not off or not size or off + size > len(self.d):
+            return []
+        t = self.d[off:off + size]
+
+        def uleb(p):
+            v, sh = 0, 0
+            while p < len(t):
+                b = t[p]
+                p += 1
+                v |= (b & 0x7f) << sh
+                sh += 7
+                if not b & 0x80:
+                    break
+            return v, p
+        out: List[Tuple[str, int]] = []
+        stack, seen = [(0, b"")], set()
+        while stack and len(out) < 500000:
+            node, prefix = stack.pop()
+            if node in seen or node >= len(t):
+                continue
+            seen.add(node)
+            tsize, p = uleb(node)
+            if tsize:
+                flags, q = uleb(p)
+                if not flags & 0x08 and (flags & 0x3) != 0x2:        # not a re-export, not absolute
+                    addr, _q = uleb(q)
+                    out.append((prefix.decode("latin-1"), self.base + addr))
+            p += tsize
+            if p >= len(t):
+                continue
+            nchild = t[p]
+            p += 1
+            for _ in range(nchild):
+                e = t.find(b"\0", p)
+                if e < 0:
+                    break
+                edge = t[p:e]
+                child, p = uleb(e + 1)
+                stack.append((child, prefix + edge))
         return out
 
     def func_starts(self) -> List[int]:
@@ -349,15 +411,20 @@ def locate(path: str, rel: str, sigs, sdk: bool) -> List[Dict[str, Any]]:
         data = fh.read()
     m = Macho(data)
     out: List[Dict[str, Any]] = []
-    seen = set()
+    seen: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
 
     def add(r):
         k = (r["indicator"], r["kind"], r["where"], r["address"])
-        if k not in seen:
-            seen.add(k)
+        old = seen.get(k)
+        if old is None:
+            seen[k] = r
             out.append(r)
+        elif r["kind"] == "native-function" and r["via"] not in old["via"] and len(old["via"]) < 400:
+            old["via"] += "; " + r["via"]          # same function, another reason (e.g. a second needle)
 
     arm64 = m.cputype == CPU_ARM64 and not m.encrypted
+    if m.slice:
+        out.append(rec("", "", "note", rel, "fat binary: addresses below refer to its %s slice" % m.slice))
     if m.encrypted:
         out.append(rec("", "", "note", rel, "FairPlay-encrypted binary: code cross-references (functions using each "
                        "string / import) are not available; scan a decrypted dump for them"))
@@ -394,15 +461,37 @@ def locate(path: str, rel: str, sigs, sdk: bool) -> List[Dict[str, Any]]:
         for n in needles:
             nb = n.encode()
             pos, cnt = d.find(nb), 0
-            while pos != -1 and cnt < 20:
+            while pos != -1 and cnt < le.MAX_OCC:
                 va = m.o2v(pos)
                 if va is not None and not any(a <= pos < b for a, b in linkedit):
                     st = pos
-                    while st > 0 and pos - st < 512 and d[st - 1] != 0 and 32 <= d[st - 1] < 127:
+                    while st > 0 and pos - st < 512 and d[st - 1] != 0 and (32 <= d[st - 1] < 127 or d[st - 1] in (9, 10, 13)):
                         st -= 1
+                    en, odd = pos + len(nb), 0          # C string: NUL within 256 bytes, at most 4 non-text bytes
+                    while en < len(d) and en - pos < 256 and d[en] != 0:
+                        odd += not (32 <= d[en] < 127 or d[en] in (9, 10, 13))
+                        en += 1
+                    if odd > 4:
+                        en = len(d)
+                    if en >= len(d) or d[en] != 0:     # packed / unterminated blob: only the exact address
+                        st = pos
                     occ.append((cat, label, n, va, m.o2v(st) or va))
                     cnt += 1
                 pos = d.find(nb, pos + len(nb))
+    def text_of(i: int) -> str:
+        """The whole string the needle sits in (a reference points at the string, not at the needle)."""
+        full = m.cstr(occ[i][4])
+        if not full or occ[i][2] not in full:
+            return occ[i][2]
+        if len(full) > 80:              # keep the matched part visible
+            k = full.index(occ[i][2])
+            if k + len(occ[i][2]) <= 77:
+                full = full[:77] + "..."
+            else:
+                a = max(0, k - 30)
+                full = "..." + full[a:k + len(occ[i][2]) + 30] + ("..." if k + len(occ[i][2]) + 30 < len(full) else "")
+        return full.replace("\n", "\\n").replace("\r", "\\r").replace('"', '\\"')
+
     targets_by_occ: Dict[int, List[Tuple[int, str]]] = {}    # target address -> [(occ index, what)]
     if occ:
         starts = {}
@@ -412,8 +501,9 @@ def locate(path: str, rel: str, sigs, sdk: bool) -> List[Dict[str, Any]]:
         for i, (_c, _l, _n, va, st) in enumerate(occ):
             targets_by_occ.setdefault(st, []).append((i, "string"))
             targets_by_occ.setdefault(va, []).append((i, "string"))
-            # Swift string literals are materialised as (address + 0x20) and then adjusted by `sub x, x, #0x20`
-            targets_by_occ.setdefault(st + 0x20, []).append((i, "Swift string literal"))
+            if 0 < va - st <= 256:      # packed strings (Rust / Swift): code may point anywhere before the needle
+                for a in range(st + 1, va):
+                    targets_by_occ.setdefault(a, []).append((i, "string"))
         cf = m.sec("__cfstring")
         if cf:
             for k in range(cf["size"] // 32):
@@ -453,14 +543,25 @@ def locate(path: str, rel: str, sigs, sdk: bool) -> List[Dict[str, Any]]:
             if not any(x["addr"] == lo for lo, _h in dranges):
                 continue
             o = x["off"]
-            for k in range(0, x["size"] - 7, 8):
+            prev = 0
+            for k in range(0, x["fsize"] - 7, 8):
                 v = struct.unpack_from("<Q", d, o + k)[0]
-                if v and ((v & 0xfffffffff) + m.base in want or (v & 0xfffffffff) in want or v in want):
+                if v:
                     t = m.decode(v) if m.fmt else v
-                    for cand in (t, (v & 0xfffffffff) + m.base):
-                        if cand in want:
-                            data_hits.append((x["addr"] + k, want[cand], "pointer in data table"))
-                            break
+                    hit = None
+                    # Swift String in static data: (_countAndFlagsBits, _object); _object holds address - 0x20
+                    if t is not None and (prev >> 48) and (t + 0x20) in want:
+                        s2 = m.cstr(t + 0x20)
+                        if s2 is not None and len(s2.encode()) == (prev & 0xffffffffffff):
+                            hit = (t + 0x20, "Swift string in data table")
+                    if hit is None:
+                        for cand in (t, (v & 0xfffffffff) + m.base):
+                            if cand in want:
+                                hit = (cand, "pointer in data table")
+                                break
+                    if hit:
+                        data_hits.append((x["addr"] + k, want[hit[0]], hit[1]))
+                prev = v
     sel_slots: Dict[int, str] = {}
     if arm64:
         for slot, sp in m.ptr_section("__objc_selrefs"):
@@ -476,7 +577,7 @@ def locate(path: str, rel: str, sigs, sdk: bool) -> List[Dict[str, Any]]:
         stub_slot: Dict[int, int] = {}
         for x in m.secs:
             if x["name"] == "__objc_stubs":
-                for k in range(0, x["size"] - 31, 32):
+                for k in range(0, x["fsize"] - 31, 32):
                     w0, w1 = struct.unpack_from("<II", d, x["off"] + k)
                     if (w0 & 0x9f000000) == 0x90000000 and (w1 & 0xffc00000) == 0xf9400000:
                         pc0 = x["addr"] + k
@@ -491,7 +592,7 @@ def locate(path: str, rel: str, sigs, sdk: bool) -> List[Dict[str, Any]]:
             for pc in pcs:
                 fstart, fname = m.func_at(pc)
                 for i, what in targets_by_occ.get(t, []):
-                    cat, label, n = occ[i][0], occ[i][1], occ[i][2]
+                    cat, label, n = occ[i][0], occ[i][1], text_of(i)
                     ctx.setdefault(cat, {}).setdefault(fstart, (fname, set()))[1].add(label)
                     add(rec(cat, label, "native-function", rel, fname, fstart,
                             'uses %s "%s" (reference at 0x%x)' % (what, n, pc), sdk))
@@ -508,7 +609,7 @@ def locate(path: str, rel: str, sigs, sdk: bool) -> List[Dict[str, Any]]:
             if j < 0 or addr - keys[j] > 0x600:
                 continue
             tgt = keys[j]
-            cat, label, n = occ[i][0], occ[i][1], occ[i][2]
+            cat, label, n = occ[i][0], occ[i][1], text_of(i)
             seen_f = set()
             while j >= 0 and keys[j] == tgt and len(seen_f) < 6:
                 fstart, fname = m.func_at(table[j][1])
@@ -518,7 +619,11 @@ def locate(path: str, rel: str, sigs, sdk: bool) -> List[Dict[str, Any]]:
                     add(rec(cat, label, "native-function", rel, fname, fstart,
                             'table at 0x%x holds "%s" (%s, slot 0x%x; heuristic)' % (tgt, n, how, addr), sdk))
                 j -= 1
+    shown_n: Dict[Tuple[str, str], int] = {}
     for i, (cat, label, n, va, st) in enumerate(occ):
+        shown_n[(label, n)] = shown_n.get((label, n), 0) + 1
+        if shown_n[(label, n)] > le.MAX_STR_SHOWN:
+            continue
         sec = m.sec_at(va)
         add(rec(cat, label, "native-string", rel, '"%s"' % n, va,
                 "in %s" % (sec["name"] if sec else "data"), sdk))
@@ -530,6 +635,15 @@ def locate(path: str, rel: str, sigs, sdk: bool) -> List[Dict[str, Any]]:
                 add(rec(cat, PROBE_LABEL, "native-function", rel, fname, fstart,
                         "%s; function also references: %s" % (what, ", ".join(sorted(funcs[fstart][1])[:3])), sdk))
 
+    # imported functions whose name is itself an indicator (e.g. _dyld_image_count)
+    needle_imps: Dict[str, List[Tuple[str, str]]] = {}
+    undef = {nm for nm, _v, ty, sect in m.syms if nm and (ty & 0xe) == 0 and (ty & 1) and not sect}
+    for cat, label, needles in sigs:
+        for nm in sorted(undef):
+            if any(n in nm for n in needles):
+                needle_imps.setdefault(nm, []).append((cat, label))
+                add(rec(cat, label, "native-import", rel, nm[1:] if nm.startswith("_") else nm, None,
+                        "imported symbol (name matches)", sdk))
     if arm64:
         for t, pcs in refs.items():
             if t in sel_slots:
@@ -540,7 +654,7 @@ def locate(path: str, rel: str, sigs, sdk: bool) -> List[Dict[str, Any]]:
         for nm, addrs in imps.items():
             specific = NATIVE_IMPORTS.get(nm)
             is_generic = nm in GENERIC_IMPORTS or any(p in nm for p in SUBSTR_IMPORTS)
-            if not specific and not is_generic:
+            if not specific and not is_generic and nm not in needle_imps:
                 continue
             st_set, slot_set = set(addrs["stubs"]), set(addrs["slots"])
             calls = le.calls_arm64(None, st_set, words) if st_set else {}
@@ -551,12 +665,11 @@ def locate(path: str, rel: str, sigs, sdk: bool) -> List[Dict[str, Any]]:
                     fstart, fname = m.func_at(pc)
                     fns.setdefault(fstart, (fname, pc))
             shown = nm[1:] if nm.startswith("_") else nm
-            if specific:
-                cat, label = specific
+            for cat, label in ([specific] if specific else []) + needle_imps.get(nm, []):
                 add(rec(cat, label, "native-import", rel, shown, None, "imported symbol", sdk))
                 for fstart, (fname, pc) in sorted(fns.items()):
                     add(rec(cat, label, "native-function", rel, fname, fstart, "calls %s at 0x%x" % (shown, pc), sdk))
-            else:
+            if not specific and nm not in needle_imps:
                 for fstart, (fname, pc) in sorted(fns.items()):
                     probe(fstart, fname, "calls %s() at 0x%x" % (shown if len(shown) < 60 else shown[:57] + "...", pc))
         fs = {}

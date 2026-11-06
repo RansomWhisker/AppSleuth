@@ -88,6 +88,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+import zlib
 from collections import Counter
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -130,15 +131,130 @@ MAX_UNPACKED_BYTES = 6 << 30      # refuse zip bombs
 MAX_UNPACKED_FILES = 250_000
 
 
+class DamagedZip(ValueError, zipfile.BadZipFile):
+    pass
+
+
+def open_zip(path) -> "zipfile.ZipFile":
+    """ZipFile that reads what Android / iOS would read: the 'encrypted' flag bit is
+    ignored (Android does; obfuscators set it to break unzip tools)."""
+    try:
+        z = zipfile.ZipFile(path)
+    except zipfile.BadZipFile as e:
+        name = path if isinstance(path, str) else "archive"
+        raise DamagedZip(f"'{name}' is a damaged zip archive ({e}); Android and iOS would also refuse "
+                         f"to install it. Re-download or re-pull the file.") from None
+    for i in z.infolist():
+        i.flag_bits &= ~0x1
+    return z
+
+
+_NAME_MAX = 200          # bytes per path component (APFS/ext4 allow 255)
+_PATH_MAX = 900          # whole relative path
+
+
+def _short(component: str) -> str:
+    if len(component.encode("utf-8", "surrogateescape")) <= _NAME_MAX:
+        return component
+    h = hashlib.sha1(component.encode("utf-8", "surrogateescape")).hexdigest()[:10]
+    stem, ext = os.path.splitext(component)
+    ext = ext if len(ext) <= 16 else ""
+    return stem[:80] + "~" + h + ext
+
+
 def _safe_extractall(z: "zipfile.ZipFile", dest: str):
-    """zipfile.extractall already strips '..' and absolute paths; this adds size and
-    entry-count limits so a hostile archive cannot fill the disk."""
+    """Extract entry by entry, the way a device installer tolerates archives:
+    '..' / absolute paths are confined to dest, the 'encrypted' flag is ignored,
+    over-long names are shortened, names that clash on a case-insensitive disk or
+    a file-vs-directory conflict are renamed, and a corrupt entry is skipped
+    (counted in z.appsleuth_skipped) instead of aborting the whole extraction.
+    Size and entry-count limits stop zip bombs."""
     infos = z.infolist()
     if len(infos) > MAX_UNPACKED_FILES:
         raise ValueError(f"archive has {len(infos)} entries (limit {MAX_UNPACKED_FILES})")
     if sum(i.file_size for i in infos) > MAX_UNPACKED_BYTES:
         raise ValueError("archive expands beyond the size limit (possible zip bomb)")
-    z.extractall(dest)
+    dest = os.path.realpath(dest)
+    os.makedirs(dest, exist_ok=True)
+    files: Dict[str, str] = {}       # casefolded rel path -> actual rel path (files)
+    dirs: Dict[str, str] = {}        # casefolded rel path -> actual rel path (directories)
+    skipped: List[str] = []
+    written = 0
+
+    def place(parts: List[str], is_dir: bool) -> List[str]:
+        """Return a rel path (list of components) that conflicts with nothing already placed."""
+        out: List[str] = []
+        for k, p in enumerate(parts):
+            last = k == len(parts) - 1
+            want_dir = is_dir or not last
+            cand = p
+            n = 0
+            while True:
+                key = "/".join(out + [cand]).casefold()
+                if want_dir:
+                    if key in dirs:
+                        cand = dirs[key].rsplit("/", 1)[-1]          # reuse the existing dir
+                        break
+                    if key not in files:
+                        dirs[key] = "/".join(out + [cand])
+                        break
+                else:
+                    if key not in dirs and (key not in files or files[key] == "/".join(out + [cand])):
+                        files[key] = "/".join(out + [cand])
+                        break
+                n += 1
+                stem, ext = os.path.splitext(p)
+                cand = f"{stem}~{n}{ext}"
+            out.append(cand)
+        return out
+
+    for info in infos:
+        info.flag_bits &= ~0x1
+        raw = info.filename.replace("\\", "/")
+        parts = [_short(p) for p in raw.split("/") if p not in ("", ".", "..")]
+        parts = [p for p in parts if p]
+        if not parts:
+            continue
+        if len("/".join(parts).encode("utf-8", "surrogateescape")) > _PATH_MAX:
+            parts = ["_long_paths", hashlib.sha1(raw.encode("utf-8", "surrogateescape")).hexdigest()[:12]
+                     + "_" + parts[-1]]
+        is_dir = raw.endswith("/")
+        rel = place(parts, is_dir)
+        target = os.path.join(dest, *rel)
+        if not os.path.realpath(target).startswith(dest + os.sep):
+            skipped.append(info.filename)
+            continue
+        try:
+            if is_dir:
+                os.makedirs(target, exist_ok=True)
+                continue
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with z.open(info) as src, open(target, "wb") as dst:
+                while True:
+                    buf = src.read(1 << 20)
+                    if not buf:
+                        break
+                    written += len(buf)
+                    if written > MAX_UNPACKED_BYTES:
+                        raise ValueError("archive expands beyond the size limit (possible zip bomb)")
+                    dst.write(buf)
+        except ValueError:
+            raise
+        except (zipfile.BadZipFile, zipfile.LargeZipFile, RuntimeError, NotImplementedError,
+                OSError, EOFError, zlib.error, struct.error) as e:
+            skipped.append(f"{info.filename} ({type(e).__name__})")
+            try:
+                if os.path.isfile(target):
+                    os.remove(target)
+            except OSError:
+                pass
+    try:
+        z.appsleuth_skipped = skipped
+    except Exception:
+        pass
+    if skipped:
+        print(f"warning: skipped {len(skipped)} unreadable archive entr{'y' if len(skipped) == 1 else 'ies'} "
+              f"(e.g. {skipped[0]})", file=sys.stderr)
 
 
 def run(cmd: List[str]) -> Tuple[int, str, str]:
@@ -1711,7 +1827,7 @@ def analyze_apk(apk_path: str, workdir: str, label: str = None) -> Tuple[Finding
     extract_dir = os.path.join(workdir, "extract_" + re.sub(r'\W+', '_', label))
     os.makedirs(extract_dir, exist_ok=True)
     try:
-        with zipfile.ZipFile(apk_path) as z:
+        with open_zip(apk_path) as z:
             names = z.namelist()
             _safe_extractall(z, extract_dir)
     except zipfile.BadZipFile:
@@ -2004,7 +2120,7 @@ def analyze_apks(path: str, workdir: str) -> Tuple[FindingsBag, Dict[str, Any]]:
 
     extract_dir = os.path.join(workdir, "apks_container")
     os.makedirs(extract_dir, exist_ok=True)
-    with zipfile.ZipFile(path) as z:
+    with open_zip(path) as z:
         _safe_extractall(z, extract_dir)
 
     apk_entries = []
@@ -2473,7 +2589,7 @@ def analyze_ipa(path: str, workdir: str) -> Tuple[FindingsBag, Dict[str, Any]]:
 
     extract_dir = os.path.join(workdir, "ipa_extract")
     os.makedirs(extract_dir, exist_ok=True)
-    with zipfile.ZipFile(path) as z:
+    with open_zip(path) as z:
         _safe_extractall(z, extract_dir)
 
     payload_dir = os.path.join(extract_dir, "Payload")
@@ -2878,7 +2994,7 @@ def analyze_aab(path: str, workdir: str) -> Tuple[FindingsBag, Dict[str, Any]]:
 
     extract_dir = os.path.join(workdir, "aab_extract")
     os.makedirs(extract_dir, exist_ok=True)
-    with zipfile.ZipFile(path) as z:
+    with open_zip(path) as z:
         names = z.namelist()
         _safe_extractall(z, extract_dir)
 
@@ -2970,6 +3086,9 @@ def unrecognised_message(path: str) -> str:
     if head[:2] == b"PK" and not zipfile.is_zipfile(path):
         return (f"'{path}' ({size / 1e6:.1f} MB) is a corrupt or truncated zip archive: the index at the end of "
                 f"the file is missing, so the download or copy was probably cut short. Re-download or re-copy it.")
+    if head[:2] != b"PK" and path.lower().endswith(".apkm"):
+        return (f"'{path}' is an encrypted APKMirror bundle (.apkm), not a zip archive. Install it with the "
+                f"APKMirror Installer and pull the APKs (e.g. getapk), or convert it to .apks first.")
     if head[:2] != b"PK":
         return f"'{path}' is not a zip archive, so it is not {kind}."
     return f"Could not recognise '{path}' as {kind}."
@@ -2979,7 +3098,7 @@ def detect_kind(path: str) -> str:
     """Returns 'apk', 'apks', 'aab', 'ipa', or 'unknown'."""
     if not zipfile.is_zipfile(path):
         return "unknown"
-    with zipfile.ZipFile(path) as z:
+    with open_zip(path) as z:
         names = z.namelist()
     if "AndroidManifest.xml" in names and any(n.startswith("classes") and n.endswith(".dex") for n in names):
         return "apk"
@@ -2995,9 +3114,9 @@ def detect_kind(path: str) -> str:
         return "apk"
     if ext == ".aab":
         return "aab"
-    if ext in (".apks", ".xapk"):
+    if ext in (".apks", ".xapk", ".apkm"):
         return "apks"
-    if ext == ".ipa":
+    if ext in (".ipa", ".tipa"):
         return "ipa"
     return "unknown"
 
@@ -3321,7 +3440,7 @@ def write_diff_markdown(diff: Dict[str, Any], path: str):
 # Batch mode
 # --------------------------------------------------------------------------
 
-_RECOGNISED_EXTS = (".apk", ".apks", ".xapk", ".aab", ".ipa")
+_RECOGNISED_EXTS = (".apk", ".apks", ".xapk", ".apkm", ".aab", ".ipa", ".tipa")
 
 
 def batch_scan(directory: str, outdir: str, recursive: bool = False, save_extracted: bool = True) -> Dict[str, Any]:

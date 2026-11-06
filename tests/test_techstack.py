@@ -61,3 +61,9 @@ class TechStack(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SplitAbis(unittest.TestCase):
+    def test_abis_from_split_apk_prefixed_names(self):
+        a = _app("android", {"split1_split_config_arm64_v8a_apk:lib/arm64-v8a/libfoo.so": b"\x7fELF"})
+        self.assertEqual(techstack.detect(a)["toolchain"].get("abis"), ["arm64-v8a"])

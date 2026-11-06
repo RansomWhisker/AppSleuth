@@ -373,7 +373,8 @@ def _android(app: appfiles.App) -> Dict[str, Any]:
 
     # toolchain
     tool: Dict[str, Any] = {}
-    abis = sorted({n.split("/")[1] for n in names if n.startswith("lib/") and n.count("/") >= 2},
+    bare = [n.split(":", 1)[1] if ":" in n.split("/", 1)[0] else n for n in names]  # drop "splitN_x_apk:" prefix
+    abis = sorted({n.split("/")[1] for n in bare if n.startswith("lib/") and n.count("/") >= 2},
                   key=lambda a: _ABI_ORDER.index(a) if a in _ABI_ORDER else 99)
     if abis:
         tool["abis"] = abis

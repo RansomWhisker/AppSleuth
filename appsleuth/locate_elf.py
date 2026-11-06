@@ -9,6 +9,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 EM_X86_64, EM_AARCH64 = 62, 183
 # imported functions that checks commonly call; reported with every call site
+# occurrences of one needle followed per binary (references); only the first MAX_STR_SHOWN are listed as strings
+MAX_OCC = 400
+MAX_STR_SHOWN = 20
+
 NATIVE_IMPORTS = {
     "ptrace": ("debugger", "Native import: ptrace (anti-debug)"),
 }
@@ -46,8 +50,9 @@ class Elf:
         self.secs = []   # dict per section
         for i in range(shnum):
             n, ty, fl, addr, off, size, link, info, _al, ent = struct.unpack_from("<IIQQQQIIQQ", data, shoff + i * shentsize)
+            fsize = 0 if ty == 8 else max(0, min(size, len(data) - off))     # NOBITS (.bss) has no file bytes
             self.secs.append({"name_off": n, "type": ty, "flags": fl, "addr": addr, "off": off, "size": size,
-                              "link": link, "info": info, "ent": ent})
+                              "fsize": fsize, "link": link, "info": info, "ent": ent})
         if shnum and shstrndx < shnum:
             so = self.secs[shstrndx]["off"]
             for s in self.secs:
@@ -82,7 +87,7 @@ class Elf:
             if s["type"] not in (2, 11):      # SYMTAB, DYNSYM
                 continue
             strs = self.secs[s["link"]]
-            for i in range(s["size"] // 24):
+            for i in range(s["fsize"] // 24):
                 no, info, _o, shndx, val, size = struct.unpack_from("<IBBHQQ", self.d, s["off"] + i * 24)
                 e = self.d.find(b"\0", strs["off"] + no)
                 nm = self.d[strs["off"] + no:e].decode("latin-1")
@@ -108,7 +113,7 @@ class Elf:
                     cnt = struct.unpack_from("<I", self.d, o + 8)[0]
                 else:
                     cnt = 0
-                for i in range(min(cnt, 2_000_000)):
+                for i in range(min(cnt, 2_000_000, max(0, (len(self.d) - pos) // 8))):
                     loc = struct.unpack_from("<i", self.d, pos + i * 8)[0]
                     starts.add(h["addr"] + loc)
         for nm, val, _sz, ty, shndx, _b, _dyn in self.syms:
@@ -151,6 +156,25 @@ def _sx(v: int, bits: int) -> int:
     return v - (1 << bits) if v & (1 << (bits - 1)) else v
 
 
+def _lo12(w2: int, rd: int) -> Optional[int]:
+    """Low part of an adrp pair: add-immediate, or any load (GPR or SIMD b/h/s/d/q, ldr or ldp) based on rd.
+    SIMD loads of string bytes (ldr q0, [x8, #lo]) are how compilers inline short string compares."""
+    if ((w2 >> 5) & 31) != rd:
+        return None
+    if (w2 & 0xff800000) == 0x91000000:                                   # add xd, xn, #imm{, lsl 12}
+        return ((w2 >> 10) & 0xfff) << (12 if (w2 >> 22) & 1 else 0)
+    if (w2 & 0x3b000000) == 0x39000000 and (w2 >> 22) & 1:               # ldr* [xn, #imm12] (unsigned offset)
+        size, v, opc = w2 >> 30, (w2 >> 26) & 1, (w2 >> 22) & 3
+        scale = (((opc >> 1) << 2) | size) if v else size
+        return ((w2 >> 10) & 0xfff) << scale
+    if (w2 & 0x3bc00000) == 0x29400000:                                   # ldp [xn, #imm7] (signed offset)
+        opc, v = w2 >> 30, (w2 >> 26) & 1
+        scale = (2 + opc) if v else (2 + (opc >> 1))
+        lo = _sx((w2 >> 15) & 0x7f, 7) << scale
+        return lo if lo >= 0 else None
+    return None
+
+
 def refs_arm64(e, targets: set, words=None) -> Dict[int, List[int]]:
     """target address -> [instruction addresses] using adrp+add / adrp+ldr pairs."""
     pages = {t & ~0xfff for t in targets}
@@ -167,14 +191,11 @@ def refs_arm64(e, targets: set, words=None) -> Dict[int, List[int]]:
             if page not in pages:
                 continue
             rd = w & 31
-            for j in range(i + 1, min(i + 6, n)):
-                w2 = a[j]
-                if (w2 & 0xff800000) == 0x91000000 and ((w2 >> 5) & 31) == rd:
-                    t = page + (((w2 >> 10) & 0xfff) << (12 if (w2 >> 22) & 1 else 0))
-                elif (w2 & 0xffc00000) == 0xf9400000 and ((w2 >> 5) & 31) == rd:
-                    t = page + (((w2 >> 10) & 0xfff) << 3)
-                else:
+            for j in range(i + 1, min(i + 13, n)):
+                lo = _lo12(a[j], rd)
+                if lo is None:
                     continue
+                t = page + lo
                 if t in targets:
                     hits.setdefault(t, []).append(pc)
                 break
@@ -198,13 +219,10 @@ def data_refs_arm64(words, ranges) -> List[Tuple[int, int]]:
             if page not in pages:
                 continue
             rd = w & 31
-            for j in range(i + 1, min(i + 6, n)):
-                w2 = a[j]
-                if (w2 & 0xff800000) == 0x91000000 and ((w2 >> 5) & 31) == rd:
-                    out.append((page + (((w2 >> 10) & 0xfff) << (12 if (w2 >> 22) & 1 else 0)), pc))
-                    break
-                if (w2 & 0xffc00000) == 0xf9400000 and ((w2 >> 5) & 31) == rd:
-                    out.append((page + (((w2 >> 10) & 0xfff) << 3), pc))
+            for j in range(i + 1, min(i + 13, n)):
+                lo = _lo12(a[j], rd)
+                if lo is not None:
+                    out.append((page + lo, pc))
                     break
     out.sort()
     return out
@@ -224,18 +242,29 @@ def calls_arm64(e, targets: set, words=None) -> Dict[int, List[int]]:
 
 def refs_x86(e: Elf, targets: set) -> Dict[int, List[int]]:
     import re
-    pat = re.compile(rb"[\x48\x4c\x44\x40]?\x8d[\x05\x0d\x15\x1d\x25\x2d\x35\x3d]|[\x48\x4c\x4d\x49]?\x8b[\x05\x0d\x15\x1d\x25\x2d\x35\x3d]", re.S)
+    rip = rb"[\x05\x0d\x15\x1d\x25\x2d\x35\x3d]"          # ModRM mod=00 rm=101: [rip + disp32]
+    pats = [
+        re.compile(rb"[\x40-\x4f]?\x8d" + rip, re.S),                       # lea
+        re.compile(rb"[\x40-\x4f]?\x8b" + rip, re.S),                       # mov r, [rip+x]
+        # two-byte opcodes without an immediate: movaps / movups / movdqa / movdqu / movzx / pcmpeqb / ptest ...
+        # (vector loads of string bytes are how compilers inline short string compares)
+        re.compile(rb"[\x66\xf2\xf3]?[\x40-\x4f]?\x0f[\x10\x11\x12\x16\x28\x29\x2e\x2f\x6f\x7e\x7f\xb6\xb7\xbe\xbf"
+                   rb"\x74\x75\x76\xd6\xdb\xeb\xef\xfc-\xfe\xd4\xf8-\xfb]" + rip, re.S),
+    ]
     hits: Dict[int, List[int]] = {}
     for s in _exec_sections(e):
         raw = e.d[s["off"]:s["off"] + s["size"]]
-        for m in pat.finditer(raw):
-            p = m.end()
-            if p + 4 > len(raw):
-                continue
-            disp = struct.unpack_from("<i", raw, p)[0]
-            t = s["addr"] + p + 4 + disp
-            if t in targets:
-                hits.setdefault(t, []).append(s["addr"] + m.start())
+        for pat in pats:
+            for m in pat.finditer(raw):
+                p = m.end()
+                if p + 4 > len(raw):
+                    continue
+                disp = struct.unpack_from("<i", raw, p)[0]
+                t = s["addr"] + p + 4 + disp
+                if t in targets:
+                    hits.setdefault(t, []).append(s["addr"] + m.start())
+    for t in hits:
+        hits[t] = sorted(set(hits[t]))
     return hits
 
 
@@ -265,7 +294,7 @@ def got_slots(e: Elf) -> Dict[str, List[int]]:
     for s in e.secs:
         if s["type"] != 4:
             continue
-        for i in range(s["size"] // 24):
+        for i in range(s["fsize"] // 24):
             off, info, _ad = struct.unpack_from("<QQq", e.d, s["off"] + i * 24)
             sym, ty = info >> 32, info & 0xffffffff
             if not sym or ty not in (1025, 1026, 6, 7, 257):   # JUMP_SLOT/GLOB_DAT (aarch64 / x86-64)
@@ -307,14 +336,17 @@ def locate(path: str, rel: str, sigs, sdk: bool) -> List[Dict[str, Any]]:
     except Exception:
         return _strings_only(data, rel, sigs, sdk)
     out: List[Dict[str, Any]] = []
-    seen = set()
+    seen: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
     ctx: Dict[str, Dict[int, Tuple[str, set]]] = {}      # category -> function start -> (name, indicator labels)
 
     def add(r):
         k = (r["indicator"], r["kind"], r["where"], r["address"])
-        if k not in seen:
-            seen.add(k)
+        old = seen.get(k)
+        if old is None:
+            seen[k] = r
             out.append(r)
+        elif r["kind"] == "native-function" and r["via"] not in old["via"] and len(old["via"]) < 400:
+            old["via"] += "; " + r["via"]          # same function, another reason (e.g. a second needle)
 
     jni = lambda n: n.replace("/", "_").replace(".", "_")
     # symbols (exported = in .dynsym and defined; internal = only in .symtab)
@@ -334,29 +366,44 @@ def locate(path: str, rel: str, sigs, sdk: bool) -> List[Dict[str, Any]]:
         for n in needles:
             nb = n.encode()
             pos, cnt = data.find(nb), 0
-            while pos != -1 and cnt < 20:
+            while pos != -1 and cnt < MAX_OCC:
                 if not any(a <= pos < b for a, b in strtab_ranges):
                     va = e.o2v(pos)
                     if va is not None:
                         st = pos
-                        while st > 0 and pos - st < 512 and data[st - 1] != 0 and 32 <= data[st - 1] < 127:
+                        while st > 0 and pos - st < 512 and data[st - 1] != 0 and (32 <= data[st - 1] < 127 or data[st - 1] in (9, 10, 13)):
                             st -= 1
+                        en, odd = pos + len(nb), 0          # C string: NUL within 256 bytes, at most 4 non-text bytes
+                        while en < len(data) and en - pos < 256 and data[en] != 0:
+                            odd += not (32 <= data[en] < 127 or data[en] in (9, 10, 13))
+                            en += 1
+                        if odd > 4:
+                            en = len(data)
+                        if en >= len(data) or data[en] != 0:     # packed / unterminated blob: only the exact address
+                            st = pos
                         occ.append((cat, label, n, pos, e.o2v(st) or va))
                         cnt += 1
                 pos = data.find(nb, pos + len(nb))
     if occ:
-        targets = {o[4] for o in occ} | {e.o2v(o[3]) for o in occ}
+        def span(o):
+            va = e.o2v(o[3])
+            # packed strings (Rust, obfuscators): code may point anywhere between the run's start and the needle
+            return set(range(o[4], va + 1)) if va is not None and 0 <= va - o[4] <= 256 else {o[4], va}
+        targets = set().union(*(span(o) for o in occ)) - {None}
         if e.machine == EM_AARCH64:
             refs = refs_arm64(e, targets)
         elif e.machine == EM_X86_64:
             refs = refs_x86(e, targets)
         else:
             refs = {}
+        shown_n: Dict[Tuple[str, str], int] = {}
         for cat, label, n, pos, st in occ:
             va = e.o2v(pos)
-            add(rec(cat, label, "native-string", rel, '"%s"' % n, va, "in read-only data", sdk))
+            shown_n[(label, n)] = shown_n.get((label, n), 0) + 1
+            if shown_n[(label, n)] <= MAX_STR_SHOWN:
+                add(rec(cat, label, "native-string", rel, '"%s"' % n, va, "in read-only data", sdk))
             fns: Dict[int, Tuple[str, int]] = {}
-            for t in {st, va}:
+            for t in sorted(span((cat, label, n, pos, st)) - {None}):
                 for pc in refs.get(t, []):
                     fstart, fname = e.func_at(pc)
                     fns.setdefault(fstart, (fname, pc))
@@ -368,7 +415,13 @@ def locate(path: str, rel: str, sigs, sdk: bool) -> List[Dict[str, Any]]:
     if e.machine in (EM_AARCH64, EM_X86_64):
         slots = got_slots(e)
         generic = [n for n in GENERIC_IMPORTS if n in slots]
-        wanted = [n for n in NATIVE_IMPORTS if n in slots] + generic
+        # imported functions whose name is itself an indicator
+        needle_imps: Dict[str, List[Tuple[str, str]]] = {}
+        for cat, label, needles in sigs:
+            for nm in slots:
+                if any(n in nm for n in needles):
+                    needle_imps.setdefault(nm, []).append((cat, label))
+        wanted = list(dict.fromkeys([n for n in NATIVE_IMPORTS if n in slots] + generic + list(needle_imps)))
         if wanted:
             stubs = plt_stubs(e)
             plt = [(x["addr"], x["addr"] + x["size"]) for x in e.secs if x["name"].startswith(".plt")]
@@ -384,12 +437,12 @@ def locate(path: str, rel: str, sigs, sdk: bool) -> List[Dict[str, Any]]:
                             continue          # the PLT stub itself, not a caller
                         fstart, fname = e.func_at(pc)
                         fns.setdefault(fstart, (fname, pc))
-                if nm in NATIVE_IMPORTS:
-                    cat, label = NATIVE_IMPORTS[nm]
-                    add(rec(cat, label, "native-import", rel, nm, None, "imported from libc", sdk))
+                pairs = ([NATIVE_IMPORTS[nm]] if nm in NATIVE_IMPORTS else []) + needle_imps.get(nm, [])
+                for cat, label in pairs:
+                    add(rec(cat, label, "native-import", rel, nm, None, "imported symbol", sdk))
                     for fstart, (fname, pc) in sorted(fns.items()):
                         add(rec(cat, label, "native-function", rel, fname, fstart, "calls %s at 0x%x" % (nm, pc), sdk))
-                else:
+                if nm in generic and nm not in NATIVE_IMPORTS:
                     for cat, funcs in ctx.items():
                         for fstart, (fname, pc) in sorted(fns.items()):
                             if fstart in funcs:
