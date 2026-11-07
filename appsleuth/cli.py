@@ -35,7 +35,7 @@ def _counts(s: Dict[str, int]) -> str:
     return "  ".join(Term.c(f"{s.get(k, 0)} {k.title()}", k) for k in ("HIGH", "MEDIUM", "LOW", "INFO"))
 
 
-def print_findings(result: Dict[str, Any], *, verbose: bool = False, show: str = "LOW"):
+def print_findings(result: Dict[str, Any], *, verbose: bool = False, show: str = "LOW", report: bool = True):
     shown = [f for f in result["findings"] if _SEV_RANK[f["severity"]] >= _SEV_RANK[show]]
     hidden = len(result["findings"]) - len(shown)
     for f in shown:
@@ -49,7 +49,8 @@ def print_findings(result: Dict[str, Any], *, verbose: bool = False, show: str =
             if f.get("evidence"):
                 print(f"        evidence: {f['evidence'][:300]}")
     if hidden:
-        print(Term.c(f"  … {hidden} lower-severity finding(s) in the report (use --show INFO to list)", "dim"))
+        what = "finding(s) in the report" if report else "note(s) not shown"
+        print(Term.c(f"  … {hidden} lower-severity {what} (use --show INFO to list)", "dim"))
 
 
 def _append_triage_md(path: str, result: Dict[str, Any]):
@@ -161,7 +162,9 @@ def cmd_scan(a):
         engine.write_baseline(result, a.write_baseline)
         print(f"Baseline written to {a.write_baseline}", file=sys.stderr if a.format == "json" else sys.stdout)
 
-    write_reports(result, outdir)
+    found = bool(result["findings"] or result.get("suppressed_count") or result.get("warnings"))
+    if found:
+        write_reports(result, outdir)
     if result.get("warnings") and a.format != "json":
         for w in result["warnings"]:
             print(Term.c("WARNING: " + w, "bold"), file=sys.stderr)
@@ -177,7 +180,7 @@ def cmd_scan(a):
     log = sys.stderr if a.format == "json" else sys.stdout          # --format json: stdout is pure JSON
     print(_counts(result["summary"]) + (f"   ({result['suppressed_count']} hidden)" if result.get("suppressed_count") else ""),
           file=log)
-    print(f"Reports: {outdir}/report.html  report.md  report.json", file=log)
+    print(f"Reports: {outdir}/report.html  report.md  report.json" if found else NOTHING, file=log)
 
     if a.fail_on:
         worst = max((_SEV_RANK[f["severity"]] for f in result["findings"]), default=-1)
@@ -261,8 +264,31 @@ def cmd_diff(a):
 
 # ------------------------------------------------------------------ intel commands
 
+_INVENTORY = {          # meta keys that hold what each command found
+    "sbom": ("components",),
+    "endpoints": ("hosts", "paths"),
+    "links": ("filters", "schemes", "associated_domains"),
+    "cloud": ("backends", "config"),
+}
+NOTHING = "Nothing found, so no report was written."
+
+
+def _found(res: Dict[str, Any], kind: str) -> bool:
+    """Did the command find anything worth a report? Inventory entries, or any finding above
+    INFO (INFO-only results are notes such as "0 components inventoried")."""
+    meta = res.get("meta") or {}
+    if any(meta.get(k) for k in _INVENTORY.get(kind, ())):
+        return True
+    return any(f.get("severity") != "INFO" for f in res.get("findings", []))
+
+
 def _intel_report(res: Dict[str, Any], a, title: str, default_dir: str):
+    """Triage, print and write reports. Returns (result, outdir), outdir None when nothing was found."""
     res = triage.apply(res, rules=_rules(a, a.target), min_severity=a.min_severity, corroborate=False)
+    if not _found(res, default_dir):
+        print(f"{os.path.basename(a.target)}: {NOTHING}")
+        print_findings(res, verbose=a.verbose, show=a.show, report=False)
+        return res, None
     out = a.outdir or f"{default_dir}_{os.path.splitext(os.path.basename(a.target))[0]}"
     write_reports(res, out, title)
     print(f"{os.path.basename(a.target)}: {_counts(res['summary'])}")
@@ -281,6 +307,8 @@ def cmd_sbom(a):
     _need_file(a)
     res, cdx = sbom.run(a.target, cves=a.cves, offline=a.offline)
     res, out = _intel_report(res, a, "Software bill of materials", "sbom")
+    if out is None:
+        return
     path = os.path.join(out, "sbom.cdx.json")
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(cdx, fh, indent=2)
@@ -294,6 +322,8 @@ def cmd_endpoints(a):
     _need_file(a)
     res = endpoints.run(a.target)
     res, out = _intel_report(res, a, "Endpoint inventory", "endpoints")
+    if out is None:
+        return
     with open(os.path.join(out, "endpoints.txt"), "w", encoding="utf-8") as fh:
         fh.write(endpoints.render_text(res, limit=100000))
 

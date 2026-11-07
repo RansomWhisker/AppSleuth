@@ -118,3 +118,14 @@ class BaselineRename(unittest.TestCase):
         f = {"title": "t", "location": "A.apk:dex", "severity": "LOW"}
         r = engine.apply_baseline({"input_file": "A.apk", "findings": [dict(f)]}, {engine.finding_fingerprint(f): {}}, "b")
         self.assertEqual(r["suppressed_count"], 1)
+
+
+class NoReportWhenNothingFound(unittest.TestCase):
+    def test_found_rules(self):
+        from appsleuth import cli
+        empty = {"meta": {"filters": [], "network_checked": False}, "findings": []}
+        self.assertFalse(cli._found(empty, "links"))
+        self.assertTrue(cli._found({"meta": {"filters": [{"hosts": ["x"]}]}, "findings": []}, "links"))
+        note = {"meta": {"components": []}, "findings": [{"severity": "INFO", "title": "0 third-party component(s)"}]}
+        self.assertFalse(cli._found(note, "sbom"))
+        self.assertTrue(cli._found({"meta": {}, "findings": [{"severity": "MEDIUM", "title": "x"}]}, "cloud"))
