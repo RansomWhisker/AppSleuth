@@ -52,6 +52,18 @@ def _base_meta(meta: Dict[str, Any]) -> Dict[str, Any]:
     return meta
 
 
+def _cordova_lines(s: Dict[str, Any]) -> List[str]:
+    cl = (s.get("hybrid") or {}).get("config_lines") or []
+    if not cl:
+        return []
+    L = ["", "Cordova whitelist (wildcards)"]
+    for e in cl:
+        L.append("  " + bad(e["text"]) + dim(f"   {e['file']}:{e['line']}"))
+    if s["platform"] == "android":
+        L.append("  " + dim("(decoded from the compiled binary XML; attribute order may differ from the source)"))
+    return L
+
+
 def _all_secrets(meta: Dict[str, Any], extra: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Every key/token/secret value the scan saw (pattern hits, high-entropy strings, Firebase config keys)."""
     out = [dict(x) for x in (meta.get("secrets") or [])]
@@ -133,6 +145,7 @@ def summarize(result: Dict[str, Any], path: Optional[str] = None) -> Dict[str, A
             "network_security_config": m.get("networkSecurityConfig_resolved"),
             "sbom": m.get("sbom") or [],
             "firebase": m.get("google_firebase_config") or {},
+            "hybrid": m.get("hybrid") or {},
             "splits": [sp.get("name") for sp in (meta.get("splits") or [])],
             "native_hardening": m.get("native_library_hardening") or [],
         })
@@ -547,12 +560,7 @@ def render_text(s: Dict[str, Any], *, full: bool = False) -> str:
         L.append("")
         L.append("App Transport Security (ATS)")
         L.extend(ats_lines(ats))
-        cl = (s.get("hybrid") or {}).get("config_lines") or []
-        if cl:
-            L.append("")
-            L.append("Cordova whitelist (wildcards)")
-            for e in cl:
-                L.append("  " + bad(e["text"]) + dim(f"   {e['file']}:{e['line']}"))
+        L.extend(_cordova_lines(s))
     else:
         L.extend(perms_mod.android_permission_lines(perms, s.get("dangerous_permissions") or [], full=full))
         comps = [c for c in (s.get("exported_components") or []) if not c.get("launcher")]
@@ -563,6 +571,7 @@ def render_text(s: Dict[str, Any], *, full: bool = False) -> str:
         if not full and len(comps) > 10:
             L.append(f"  … {len(comps) - 10} more (use --full)")
         _kv(L, "Network sec. config", s.get("network_security_config"))
+        L.extend(_cordova_lines(s))
 
     libs = s.get("libraries") or []
     L.append("")

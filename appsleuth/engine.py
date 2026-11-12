@@ -2131,6 +2131,12 @@ def analyze_apk(apk_path: str, workdir: str, label: str = None) -> Tuple[Finding
                           "that actually protects the backend, not hiding these values.",
                           evidence=json.dumps(found_cfg))
 
+    # ---- Cordova / Capacitor hybrid layer (config + bundled web assets) ----
+    try:
+        analyze_hybrid_web(extract_dir, [], findings, meta, label, android=True)
+    except Exception as e:
+        findings.add("LOW", "Hybrid web analysis failed", f"{type(e).__name__}: {e}")
+
     return findings, meta
 
 
@@ -2466,17 +2472,69 @@ _PREFERENCES_RE = re.compile(rb"""Preferences\.set\(\s*\{\s*key\s*:\s*["'](""" +
 _URL_HOST_RE = re.compile(rb"https?://([A-Za-z0-9.-]+\.[A-Za-z]{2,})(?::\d+)?")
 
 
+def _android_cordova_config(app_dir: str):
+    """Cordova's config.xml on Android is compiled into the APK as binary XML (res/xml/config.xml, or a
+    shrunk/renamed res/*.xml). Returns (relative path, [(tag, attrs, line)]) for the one whose root is
+    <widget>, else None."""
+    res = os.path.join(app_dir, "res")
+    if not os.path.isdir(res):
+        return None
+    cands = [os.path.join(res, "xml", "config.xml")]
+    for root, _d, files in os.walk(res):
+        cands.extend(os.path.join(root, f) for f in sorted(files) if f.endswith(".xml"))
+    seen = set()
+    for fp in cands:
+        if fp in seen or not os.path.isfile(fp) or os.path.islink(fp):
+            continue
+        seen.add(fp)
+        try:
+            data = open(fp, "rb").read()
+            if len(data) < 8 or _u16(data, 0) != RES_XML_TYPE:
+                continue
+            if b"widget" not in data and "widget".encode("utf-16-le") not in data:
+                continue
+            strings, events = parse_axml(data)
+        except Exception:
+            continue
+        entries, root_tag = [], None
+        for ev in events:
+            if ev[0] != "start":
+                continue
+            _, tag, raw_attrs, line = ev
+            if root_tag is None:
+                root_tag = tag
+            attrs = {}
+            for (_ns, a_name, a_raw, a_type, a_data) in raw_attrs:
+                nm = _get_string(strings, a_name)
+                if nm is not None:
+                    attrs[nm] = _attr_value(strings, a_raw, a_type, a_data)
+            entries.append((tag, attrs, line))
+        if root_tag == "widget":
+            return os.path.relpath(fp, app_dir).replace(os.sep, "/"), entries
+    return None
+
+
 def analyze_hybrid_web(app_dir: str, frameworks: List[str], findings: "FindingsBag", meta: Dict[str, Any],
-                       scan_label: str):
+                       scan_label: str, android: bool = False):
     """Capacitor / Cordova apps ship most of their logic as readable web files plus a
     JSON/XML config. A native-binary-only scan misses all of it."""
-    cap_cfg = os.path.join(app_dir, "capacitor.config.json")
-    cordova_cfg = os.path.join(app_dir, "config.xml")
-    is_cap = os.path.isfile(cap_cfg) or any(f.startswith("Capacitor") for f in frameworks)
-    is_cordova = os.path.isfile(cordova_cfg) or any(f.startswith("Cordova") for f in frameworks)
-    web_root = next((os.path.join(app_dir, d) for d in ("public", "www")
+    droid_cordova = None
+    if android:
+        cap_cfg = os.path.join(app_dir, "assets", "capacitor.config.json")
+        cordova_cfg = os.path.join(app_dir, "\0no-plain-config.xml")      # Android's is binary XML, decoded below
+        droid_cordova = _android_cordova_config(app_dir)
+        is_cap = os.path.isfile(cap_cfg)
+        is_cordova = droid_cordova is not None or os.path.isfile(os.path.join(app_dir, "assets", "www", "cordova.js"))
+        web_dirs = ("assets/public", "assets/www")
+    else:
+        cap_cfg = os.path.join(app_dir, "capacitor.config.json")
+        cordova_cfg = os.path.join(app_dir, "config.xml")
+        is_cap = os.path.isfile(cap_cfg) or any(f.startswith("Capacitor") for f in frameworks)
+        is_cordova = os.path.isfile(cordova_cfg) or any(f.startswith("Cordova") for f in frameworks)
+        web_dirs = ("public", "www")
+    web_root = next((os.path.join(app_dir, d) for d in web_dirs
                      if os.path.isdir(os.path.join(app_dir, d))), None)
-    if not (is_cap or is_cordova) or not web_root:
+    if not (is_cap or is_cordova) or not (web_root or droid_cordova):
         return
     kind = "Capacitor" if is_cap else "Cordova"
     plugins = sorted(f[:-len(".framework")] for f in frameworks
@@ -2521,26 +2579,40 @@ def analyze_hybrid_web(app_dir: str, frameworks: List[str], findings: "FindingsB
             findings.add("LOW", "Capacitor verbose logging enabled (loggingBehavior=debug)",
                           "Debug logging can leak request data and tokens into device logs.", location=loc,
                           confidence="confirmed")
-    if os.path.isfile(cordova_cfg):
+    _CORDOVA_RULES = (
+        ("access", "origin", "Cordova <access origin=\"*\"> allows requests to any host"),
+        ("allow-navigation", "href", "Cordova <allow-navigation href=\"*\"> allows any navigation"),
+        ("allow-intent", "href", "Cordova <allow-intent href=\"*\"> allows opening any URL scheme"))
+    cordova_hits = []          # (rule index, exact tag text, line, file)
+    if droid_cordova:
+        cfg_rel, entries = droid_cordova
+        for tag, attrs, line in entries:
+            for k, (rt, ra, _t) in enumerate(_CORDOVA_RULES):
+                if tag == rt and attrs.get(ra) == "*":
+                    text = "<" + tag + "".join(f' {a}="{v}"' for a, v in attrs.items()) + " />"
+                    cordova_hits.append((k, text, line, cfg_rel))
+    elif os.path.isfile(cordova_cfg):
         try:
             xml = open(cordova_cfg, "rb").read()
         except OSError:
             xml = b""
-        for tag, attr, title in (
-                (b"access", b"origin", "Cordova <access origin=\"*\"> allows requests to any host"),
-                (b"allow-navigation", b"href", "Cordova <allow-navigation href=\"*\"> allows any navigation"),
-                (b"allow-intent", b"href", "Cordova <allow-intent href=\"*\"> allows opening any URL scheme")):
-            for m in re.finditer(rb"<" + tag + rb"\b[^>]*\b" + attr + rb"\s*=\s*[\"']\*[\"'][^>]*>", xml):
-                meta["hybrid"].setdefault("config_lines", []).append({
-                    "file": "config.xml", "line": xml.count(b"\n", 0, m.start()) + 1,
-                    "text": m.group(0).decode("utf-8", "replace")})
-            if re.search(rb"<" + tag + rb"\b[^>]*\b" + attr + rb"\s*=\s*[\"']\*[\"']", xml):
-                findings.add("MEDIUM", title,
-                              "Wildcard whitelist entries remove Cordova's origin restrictions, so any loaded "
-                              "page can reach native plugins or navigate the WebView anywhere.",
-                              location="config.xml", confidence="confirmed")
+        for k, (rt, ra, _t) in enumerate(_CORDOVA_RULES):
+            for m in re.finditer(rb"<" + rt.encode() + rb"\b[^>]*\b" + ra.encode() + rb"\s*=\s*[\"']\*[\"'][^>]*>", xml):
+                cordova_hits.append((k, m.group(0).decode("utf-8", "replace"),
+                                     xml.count(b"\n", 0, m.start()) + 1, "config.xml"))
+    for k, text, line, cfg_rel in cordova_hits:
+        meta["hybrid"].setdefault("config_lines", []).append({"file": cfg_rel, "line": line, "text": text})
+    for k, (_rt, _ra, title) in enumerate(_CORDOVA_RULES):
+        hit = next((h for h in cordova_hits if h[0] == k), None)
+        if hit:
+            findings.add("MEDIUM", title,
+                          "Wildcard whitelist entries remove Cordova's origin restrictions, so any loaded "
+                          "page can reach native plugins or navigate the WebView anywhere.",
+                          evidence=hit[1], location=hit[3], confidence="confirmed")
 
     # ---- web assets ----
+    if not web_root:
+        return
     maps, blobs, total, skipped = [], [], 0, 0
     for root, _dirs, files in os.walk(web_root):
         for fn in sorted(files):
