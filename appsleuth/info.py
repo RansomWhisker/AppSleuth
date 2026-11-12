@@ -23,6 +23,11 @@ FLAG_TITLES = {
     "cordova_access_any_origin": ("Cordova <access origin=",),
     "cordova_navigation_any_host": ("Cordova <allow-navigation",),
     "cordova_intent_any_url": ("Cordova <allow-intent",),
+    "hybrid_no_csp": ("No Content-Security-Policy in index.html",),
+    "cordova_remote_start_page": ("Cordova start page is a remote URL",),
+    "cordova_insecure_file_mode": ("Cordova AndroidInsecureFileModeEnabled is on",),
+    "hybrid_http_scheme": ("Cordova serves the app over http://", "Capacitor serves the app over http://"),
+    "capacitor_mixed_content": ("Capacitor allows mixed content",),
     "capacitor_navigation_any_host": ("Capacitor allowNavigation permits any host",),
     "main_binary_encrypted": ("Main binary is still FairPlay-encrypted",),
     "file_sharing": ("iTunes/Finder file sharing enabled",),
@@ -583,7 +588,8 @@ def render_text(s: Dict[str, Any], *, full: bool = False) -> str:
     if hy:
         L.append("")
         L.append(f"Hybrid app: {hy.get('framework')}  (web layer: {hy.get('web_files_scanned')} files)")
-        _kv(L, "Plugins", ", ".join(hy.get("plugins") or []))
+        pv = hy.get("plugin_versions") or {}
+        _kv(L, "Plugins", ", ".join(f"{k} {v}".strip() for k, v in pv.items()) if pv else ", ".join(hy.get("plugins") or []))
         _kv(L, "External hosts", ", ".join((hy.get("external_hosts") or [])[: (60 if full else 8)]))
 
     sec = s.get("secrets") or []

@@ -63,6 +63,68 @@ class RuntimeFindings(unittest.TestCase):
             runtime.run_probe("android", "com.x; rm -rf /", seconds=1)
 
 
+class Breakdown(unittest.TestCase):
+    STATS = {"t": "hook_stats", "hooks": {
+        "NSURLSessionTask - resume": {"installed": True, "calls": 9, "emitted": 2, "optional": False},
+        "WKWebView - loadRequest:": {"installed": True, "calls": 0, "emitted": 0, "optional": False},
+        "WKWebView - setInspectable:": {"installed": False, "calls": 0, "emitted": 0, "optional": True},
+        "Security!SecItemAdd": {"installed": False, "calls": 0, "emitted": 0, "optional": False}}}
+
+    def test_per_hook_counts_silent_and_missing(self):
+        ev = [self.STATS,
+              {"t": "net", "hook": "NSURLSessionTask - resume", "how": "URLSessionTask resume", "scheme": "https",
+               "host": "api.example.com", "path": "/v1"},
+              {"t": "net", "hook": "NSURLSessionTask - resume", "scheme": "https", "host": "api.example.com", "path": "/v2"}]
+        _, r = titles(ev, "ios")
+        h = {x["name"]: x for x in r["meta"]["hooks"]}
+        self.assertEqual((h["NSURLSessionTask - resume"]["calls"], h["NSURLSessionTask - resume"]["events"]), (9, 2))
+        self.assertEqual(h["WKWebView - loadRequest:"]["calls"], 0)
+        text = "\n".join(runtime.breakdown_lines(r))
+        self.assertIn("1 fired, 1 installed but silent, 1 not found", text)
+        self.assertIn("not found: Security!SecItemAdd", text)
+        self.assertNotIn("setInspectable", text)                # optional hooks are not reported as missing
+        t = [x[1] for x in titles(ev, "ios")[0]]
+        self.assertIn("1 runtime hook(s) could not be installed", t)
+        self.assertIn("Network requests observed to 1 host(s)", t)
+
+    def test_dns_without_requests_is_a_coverage_gap(self):
+        t, _ = titles([{"t": "dns", "host": "api.example.com"}, {"t": "dns", "host": "gsp.apple.com"}], "ios")
+        self.assertEqual(t, [("LOW", "Network hooks saw no requests although the app resolved host names")])
+        t, _ = titles([{"t": "dns", "host": "api.example.com"}, {"t": "net", "host": "api.example.com"}], "ios")
+        self.assertNotIn("Network hooks saw no requests although the app resolved host names", [x[1] for x in t])
+
+    def test_trust_and_webview_observations(self):
+        t, _ = titles([{"t": "trust_eval", "by": "app"}, {"t": "trust_eval", "by": "system"},
+                       {"t": "trust_override", "how": "SecTrustSetExceptions"},
+                       {"t": "trust_override", "how": "SecTrustSetAnchorCertificatesOnly"},
+                       {"t": "webview_load", "url": "https://m.example.com/home"}], "ios")
+        got = dict((x[1], x[0]) for x in t)
+        self.assertEqual(got["App code evaluates TLS trust itself (observed)"], "INFO")
+        self.assertEqual(got["App code sets TLS trust exceptions at runtime (observed)"], "MEDIUM")
+        self.assertEqual(got["WebView loaded 1 page(s) (observed)"], "INFO")
+        self.assertEqual(got["App code customises TLS trust anchors (observed)"], "INFO")
+
+    def test_sockets(self):
+        t, _ = titles([{"t": "dns", "host": "api.example.com"}, {"t": "socket", "ip": "203.0.113.9", "port": 443},
+                       {"t": "socket", "ip": "203.0.113.9", "port": 80}, {"t": "socket", "ip": "127.0.0.1", "port": 80}], "ios")
+        got = dict((x[1], x[0]) for x in t)
+        self.assertEqual(got["App opened a connection to port 80 (plaintext HTTP likely)"], "MEDIUM")
+        self.assertEqual(got["Raw socket connections observed to 2 endpoint(s)"], "INFO")
+        self.assertNotIn("Network hooks saw no requests although the app resolved host names", got)   # sockets count as seen
+
+    def test_dump_redacts_values(self):
+        import os, tempfile
+        path = os.path.join(tempfile.mkdtemp(), "ev.jsonl")
+        n = runtime.dump_events([{"t": "prefs_write", "key": "auth_token", "value": JWT},
+                                 {"t": "log", "tag": "x", "msg": "Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345"},
+                                 {"t": "net", "host": "a.example.com"}], path)
+        text = open(path).read()
+        self.assertEqual(n, 3)
+        self.assertNotIn(JWT, text)
+        self.assertNotIn("abcdefghijklmnop", text)
+        self.assertIn("a.example.com", text)
+
+
 if __name__ == "__main__":
     unittest.main()
 

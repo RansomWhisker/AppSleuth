@@ -30,9 +30,18 @@ class EndToEnd(unittest.TestCase):
         mk_ipa(self.b, version="2", perms=["NSCameraUsageDescription"], schemes=["myapp"],
                files={"public/app.js": b"var x=2;"})
 
+    def test_no_files_without_report_flag(self):
+        for args in (("scan", self.a), ("diff", self.a, self.b), ("endpoints", self.a), ("links", self.a),
+                     ("sbom", self.a), ("cloud", self.a)):
+            out = os.path.join(self.d, "none_" + args[0])
+            code, text, _ = run(*args, "-o", out)
+            self.assertEqual(code, 0, text)
+            self.assertFalse(os.path.exists(out), f"{args[0]} wrote files without --report")
+            self.assertNotIn("Reports:", text)
+
     def test_scan_writes_reports(self):
         out = os.path.join(self.d, "r")
-        code, text, _ = run("scan", self.a, "-o", out)
+        code, text, _ = run("scan", self.a, "--report", "-o", out)
         self.assertEqual(code, 0, text)
         with open(os.path.join(out, "report.json"), encoding="utf-8") as fh:
             data = json.load(fh)
@@ -46,7 +55,7 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("com.t.app", text)
 
     def test_diff(self):
-        code, text, _ = run("diff", self.a, self.b, "-o", os.path.join(self.d, "dd"))
+        code, text, _ = run("diff", self.a, self.b, "--report", "-o", os.path.join(self.d, "dd"))
         self.assertEqual(code, 0, text)
         self.assertIn("1 → 2", text)
 

@@ -3,7 +3,7 @@
   "private": true,
   "description": "Build step for the Frida agents (Frida 17 no longer bundles the ObjC/Java bridges). Run: npm install && npm run build",
   "scripts": {
-    "build": "frida-compile src/ios.js -o ../ios.js -c && frida-compile src/android.js -o ../android.js -c"
+    "build": "frida-compile src/ios.js -o ../ios.js -c && frida-compile src/android.js -o ../android.js -c && frida-compile src/keychain.js -o ../keychain.js -c"
   },
   "devDependencies": {
     "frida-compile": "19.1.0",

@@ -272,18 +272,105 @@ def keychain_access_name(code: str) -> str:
     return KEYCHAIN_ACCESS.get((code or "").strip(), f"unknown ({code})" if code else "unknown")
 
 
-def keychain_lines(kc: Optional[Dict[str, Any]]) -> List[str]:
-    """Plain-text table of the app's keychain items, with their accessibility class."""
+def keychain_short_name(code: str) -> str:
+    """'kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly' -> 'AfterFirstUnlockThisDeviceOnly'."""
+    return keychain_access_name(code).replace("kSecAttrAccessible", "")
+
+
+def keychain_item_label(it: Dict[str, Any]) -> str:
+    name = it.get("service") or it.get("label") or "(no service)"
+    return f"{name} / {it['account']}" if it.get("account") else name
+
+
+def keychain_lines(kc: Optional[Dict[str, Any]], color=None, value_width: int = 70) -> List[str]:
+    """Terminal table of the app's keychain items: one aligned row per item, weakest accessibility first.
+    color(text, kind) is optional (cli passes its Term.c); the table is plain text without it."""
     items = (kc or {}).get("items") or []
     if not items:
         return []
-    out = [f"Keychain items for this app ({len(items)}); values are encrypted and not read"]
-    for it in items:
-        name = it.get("service") or it.get("label") or "(no service)"
-        acct = f" / {it['account']}" if it.get("account") else ""
-        out.append(f"  [{it['class']}] {name}{acct}")
-        out.append(f"      {keychain_access_name(it.get('accessible', ''))}   group: {it.get('group', '')}")
+    c = color or (lambda text, _kind: text)
+    weak = lambda it: it.get("accessible") in ("dk", "dku")
+    rows = sorted(items, key=lambda it: (not weak(it), keychain_short_name(it.get("accessible", "")), keychain_item_label(it)))
+    groups = sorted({it.get("group", "") for it in rows if it.get("group")})
+    have_values = any("value" in it for it in rows)
+    w_acc = max(len(keychain_short_name(it.get("accessible", ""))) for it in rows)
+    w_cls = max(len(it.get("class", "")) for it in rows)
+    head = f"Keychain: {len(rows)} item(s)" + (f" in {groups[0]}" if len(groups) == 1 else "")
+    note = ("values decrypted on the device" if have_values else
+            "values not read (frida-server missing, or --no-keychain-values)")
+    out = [c(head, "id") + c(f"   {note}", "dim")]
+    for it in rows:
+        acc = keychain_short_name(it.get("accessible", "")).ljust(w_acc)
+        acc = c(acc, "MEDIUM") if weak(it) else acc
+        line = f"  {acc}  {it.get('class', '').ljust(w_cls)}  {keychain_item_label(it)}"
+        if len(groups) > 1 and it.get("group"):
+            line += c(f"   [{it['group']}]", "dim")
+        out.append(line)
+        if "value" in it:
+            v = it["value"]
+            shown = c("(not readable)", "dim") if v is None else (v if len(v) <= value_width else v[:value_width] + "...")
+            out.append("      " + c("value", "dim") + "  " + shown)
     return out
+
+
+_KC_LOCKED, _KC_NO_ENTITLEMENT = -25308, -34018
+
+
+def merge_keychain_values(kc: Dict[str, Any], read: Dict[str, Any]) -> Dict[str, Any]:
+    """Add values read on the device (runtime.read_keychain_values) to the metadata items.
+    Items are matched on class + service + account; ones only the device returned are appended."""
+    items = kc.setdefault("items", [])
+    index = {(i.get("class"), i.get("service", ""), i.get("account", "")): i for i in items}
+    for r in read.get("items", []):
+        it = index.get((r.get("class"), r.get("service", ""), r.get("account", "")))
+        if it is None:
+            it = {k: r.get(k, "") for k in ("class", "service", "account", "label", "group", "accessible")}
+            items.append(it)
+            index[(it["class"], it["service"], it["account"])] = it
+        it["value"] = r.get("value")
+        it["value_kind"] = r.get("kind")
+        it["value_length"] = r.get("length")
+    for it in items:                                    # metadata rows the app could not read
+        it.setdefault("value", None)
+    locked = [c for c, st in (read.get("status") or {}).items() if st == _KC_LOCKED]
+    kc["values_read"] = True
+    kc["values_note"] = ("read on the device by the app itself; " + ("unlock the phone and re-run to read: "
+                         + ", ".join(locked) if locked else "items outside the app's own access groups are not returned"))
+    kc["note"] = "values read with Frida inside the app"
+    return kc
+
+
+def mask_keychain(kc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Copy of the keychain data with each value replaced by its length (for --redact and reports)."""
+    if not kc:
+        return kc
+    out = dict(kc)
+    out["items"] = [dict(i, value=(None if i.get("value") is None else f"<{len(i['value'])} chars hidden>"))
+                    if "value" in i else dict(i) for i in kc.get("items", [])]
+    return out
+
+
+def _values_in_plaintext(root: str, kc: Dict[str, Any]) -> Dict[str, List[str]]:
+    """item label -> container files that contain that item's secret value verbatim."""
+    needles = {}
+    for it in kc.get("items", []):
+        v = it.get("value")
+        if isinstance(v, str) and len(v) >= 8 and it.get("value_kind") == "text":
+            needles[keychain_item_label(it)] = (v.encode("utf-8"), v.encode("utf-16-le"))
+    hits: Dict[str, List[str]] = {}
+    if not needles:
+        return hits
+    for full, rel in _walk(root):
+        try:
+            if os.path.getsize(full) > 16 << 20:
+                continue
+            data = open(full, "rb").read()
+        except OSError:
+            continue
+        for label, pats in needles.items():
+            if any(p in data for p in pats):
+                hits.setdefault(label, []).append(rel)
+    return hits
 
 
 def _keychain_findings(kc: Dict[str, Any], add) -> None:
@@ -308,7 +395,8 @@ def _keychain_findings(kc: Dict[str, Any], add) -> None:
             add("MEDIUM", f"Keychain items readable while the device is locked ({name})",
                 f"{len(group)} item(s) use {name}: they can be read at any time, even before the first unlock "
                 "after boot. This class is deprecated; use WhenUnlocked (or WhenPasscodeSet) for credentials.",
-                evidence=ev(group), location="keychain-2.db", confidence="confirmed")
+                evidence=ev(group), location="keychain: " + ", ".join(keychain_item_label(i) for i in group[:3])
+                + (f" (+{len(group) - 3} more)" if len(group) > 3 else ""), confidence="confirmed")
         else:
             add("INFO", f"Keychain items: {len(group)} with {name}",
                 "Accessibility class of keychain items belonging to this app. "
@@ -470,8 +558,15 @@ def audit_dir(root: str, platform: str = "ios", *, reveal: bool = True,
             confidence="heuristic")
 
     if keychain is not None:
-        meta["keychain"] = keychain
+        meta["keychain"] = keychain if reveal else mask_keychain(keychain)
         _keychain_findings(keychain, add)
+        if keychain.get("values_read"):
+            for label, files in sorted(_values_in_plaintext(root, keychain).items()):
+                add("HIGH", "Keychain secret is also stored in plaintext in the app container",
+                    f"The value of keychain item '{label}' appears verbatim in the app's data files, so storing it "
+                    "in the keychain adds no protection: anyone who can read the container (jailbreak, backup, "
+                    "forensic image) gets it anyway. Remove the plaintext copy.",
+                    evidence=f"{label}: " + ", ".join(files[:6]), location=files[0], confidence="confirmed")
     meta.update({"files": n_files, "bytes": total, "by_type": dict(types),
                  "largest": [{"path": r, "bytes": s} for s, r in sorted(sizes, reverse=True)[:8]]})
     findings.sort(key=lambda f: -_SEV[f["severity"]])

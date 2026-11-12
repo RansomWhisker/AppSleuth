@@ -1100,10 +1100,42 @@ def _classify_secret(name: str, token: bytes, blob: bytes, pos: int):
     return ("HIGH", f"Possible hardcoded secret: {name}", "", "heuristic")
 
 
+def file_line_locator(names: List[str], blobs: List[bytes], sep_len: int = 1):
+    """Locator for a blob built as sep.join(blobs): offset -> 'path:line' (plus ':col' when the line is
+    long, i.e. minified JS where the line number alone says little)."""
+    import bisect
+    starts, off = [], 0
+    for b in blobs:
+        starts.append(off)
+        off += len(b) + sep_len
+
+    def locate(blob: bytes, pos: int) -> str:
+        i = max(0, bisect.bisect_right(starts, pos) - 1)
+        start = starts[i]
+        line = blob.count(b"\n", start, pos) + 1
+        ls = blob.rfind(b"\n", start, pos) + 1
+        ls = max(ls, start)
+        le = blob.find(b"\n", pos)
+        le = len(blob) if le < 0 else le
+        out = f"{names[i]}:{line}"
+        if le - ls > 300:
+            out += f":{pos - ls + 1}"
+        return out
+    return locate
+
+
+def offset_locator(label: str):
+    """Locator for a single binary: offset -> 'label @0xOFFSET' (file offset, e.g. for Mach-O)."""
+    return lambda blob, pos: f"{label} @0x{pos:x}"
+
+
 def scan_bytes_for_patterns(blob: bytes, source_label: str, findings: FindingsBag,
-                             dexfile: Optional["DexFile"] = None, web_layer: bool = False):
+                             dexfile: Optional["DexFile"] = None, web_layer: bool = False,
+                             locate=None):
     """web_layer=True when scanning bundled JavaScript/HTML: skips checks built on short
-    native-binary substrings that mean nothing in JS."""
+    native-binary substrings that mean nothing in JS. `locate(blob, pos)` gives the exact
+    location (file:line, file offset) of a secret hit; without it the location is the label
+    (or the dex class/method that references the string)."""
     seen_tokens = set()
     for name, pattern in SECRET_PATTERNS:
         for m in pattern.finditer(blob):
@@ -1116,15 +1148,15 @@ def scan_bytes_for_patterns(blob: bytes, source_label: str, findings: FindingsBa
                 continue
             sev, title, extra, conf = verdict
             snippet = token[:60].decode('utf-8', errors='replace')
-            findings.add_secret(name, token.decode('utf-8', errors='replace'), sev,
-                                _resolve_dex_location(dexfile, snippet, source_label))
+            hit_loc = locate(blob, m.start()) if locate else _resolve_dex_location(dexfile, snippet, source_label)
+            findings.add_secret(name, token.decode('utf-8', errors='replace'), sev, hit_loc)
             findings.add(sev, title,
                           f"A string matching the shape of a {name} was found embedded in {source_label}. "
                           f"Client binaries can always be extracted and read, so anything credential-like "
                           f"here should be treated as exposed (rotate it and move it server-side)." + extra
                           if sev in ("HIGH", "MEDIUM") else
                           f"A string matching the shape of a {name} was found in {source_label}." + extra,
-                          evidence=snippet, location=_resolve_dex_location(dexfile, snippet, source_label),
+                          evidence=snippet, location=hit_loc,
                           confidence=conf if dexfile is None else ("confirmed" if conf == "confirmed" or dexfile is not None else conf))
 
     strong_weak, md_only = _weak_crypto_hits(blob)
@@ -2514,6 +2546,174 @@ def _android_cordova_config(app_dir: str):
     return None
 
 
+_XML_TAG_RE = re.compile(r"<([A-Za-z][\w:-]*)((?:\s+[\w:.-]+\s*=\s*(?:\"[^\"]*\"|'[^']*'))*)\s*/?>")
+_XML_ATTR_RE = re.compile(r"([\w:.-]+)\s*=\s*(?:\"([^\"]*)\"|'([^']*)')")
+
+
+def _xml_entries(xml: bytes) -> List[Tuple[str, Dict[str, str], int]]:
+    """(tag, attrs, line) for every start tag of a plain-text XML file (Cordova config.xml)."""
+    text = xml.decode("utf-8", "replace")
+    out = []
+    for m in _XML_TAG_RE.finditer(text):
+        attrs = {a.group(1): a.group(2) if a.group(2) is not None else a.group(3)
+                 for a in _XML_ATTR_RE.finditer(m.group(2))}
+        out.append((m.group(1), attrs, text.count("\n", 0, m.start()) + 1))
+    return out
+
+
+def _truthy(v) -> bool:
+    return str(v).strip().lower() in ("true", "1", "yes")
+
+
+# (preference name, test on the value, severity, title, explanation)
+_CORDOVA_PREFS = (
+    ("AndroidInsecureFileModeEnabled", _truthy, "MEDIUM", "Cordova AndroidInsecureFileModeEnabled is on",
+     "Lets pages loaded from file:// read other local files and access cross-origin content. Any XSS in the "
+     "app then becomes local file theft. Leave it off unless the app cannot work without it."),
+    ("AllowUntrustedCerts", _truthy, "HIGH", "Cordova accepts untrusted TLS certificates (AllowUntrustedCerts)",
+     "Certificate validation is disabled for the app's HTTPS connections, so traffic can be intercepted."),
+    ("scheme", lambda v: str(v).strip().lower() == "http", "MEDIUM", "Cordova serves the app over http:// (scheme=http)",
+     "The bundled app is served from http://localhost-style origin instead of https, which weakens "
+     "secure-context features and mixes with plaintext content."),
+    ("BackupWebStorage", lambda v: str(v).strip().lower() == "cloud", "LOW",
+     "Cordova web storage is included in iCloud backups (BackupWebStorage=cloud)",
+     "localStorage/IndexedDB content is copied to iCloud backups. Use 'local' or 'none' if it holds tokens "
+     "or personal data."),
+)
+
+_CSP_META_RE = re.compile(rb"<meta\b[^>]*http-equiv\s*=\s*[\"']?Content-Security-Policy[\"']?[^>]*>", re.I)
+_CSP_CONTENT_RE = re.compile(rb"content\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", re.I)
+
+
+def _csp_problems(policy: str) -> List[str]:
+    """Weaknesses in a CSP string: wildcard sources, unsafe-inline/eval in script-src, no script restriction."""
+    directives = {}
+    for part in policy.split(";"):
+        bits = part.split()
+        if bits:
+            directives[bits[0].lower()] = bits[1:]
+    script = directives.get("script-src") or directives.get("default-src")
+    out = []
+    if script is None:
+        out.append("no script-src or default-src")
+    else:
+        if "'unsafe-inline'" in script and not any(x.startswith(("'nonce-", "'sha")) for x in script):
+            out.append("script-src allows 'unsafe-inline'")
+        if "'unsafe-eval'" in script:
+            out.append("script-src allows 'unsafe-eval'")
+        if any(x in ("*", "http:", "https:", "data:") for x in script):
+            out.append("script-src allows any " + next(x for x in script if x in ("*", "http:", "https:", "data:")) + " source")
+    return out
+
+
+def _plugin_versions(app_dir: str, web_root: Optional[str]) -> Dict[str, str]:
+    """Cordova plugin name -> version from www/cordova_plugins.js (its metadata block)."""
+    out: Dict[str, str] = {}
+    for root in filter(None, (web_root, os.path.join(app_dir, "www"), os.path.join(app_dir, "public"))):
+        fp = os.path.join(root, "cordova_plugins.js")
+        if not os.path.isfile(fp):
+            continue
+        try:
+            text = open(fp, encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        m = re.search(r"metadata\s*=\s*(?=\{)", text)
+        if m:
+            try:
+                meta_obj, _end = json.JSONDecoder().raw_decode(text, m.end())
+                for k, v in meta_obj.items():
+                    out[k] = str(v)
+            except ValueError:
+                for k, v in re.findall(r"[\"']([\w.@/-]+)[\"']\s*:\s*[\"']([\w.+-]+)[\"']", text[m.end():m.end() + 4000]):
+                    out[k] = v
+        break
+    return out
+
+
+def analyze_hybrid_config(app_dir: str, web_root: Optional[str], entries: List[Tuple[str, Dict[str, str], int]],
+                          cfg_file: str, findings: "FindingsBag", meta: Dict[str, Any], frameworks: List[str]):
+    """Cordova/Capacitor checks beyond the wildcard whitelist: remote start page, risky preferences,
+    Content-Security-Policy, and the plugin inventory with versions."""
+    hy = meta["hybrid"]
+    for tag, attrs, line in entries:
+        loc = f"{cfg_file}:{line}"
+        if tag == "content":
+            src = attrs.get("src", "")
+            if re.match(r"(?i)https?://", src):
+                insecure = src.lower().startswith("http://")
+                findings.add("HIGH" if insecure else "MEDIUM", "Cordova start page is a remote URL (<content src>)",
+                             "The app's main page is loaded from a remote server instead of the bundled files, so its "
+                             "code is whatever that server returns" +
+                             (", over plaintext HTTP (injectable by a network attacker)." if insecure else "; a server "
+                              "compromise or a misissued certificate becomes code execution inside the app."),
+                             evidence=f'<content src="{src}" />', location=loc, confidence="confirmed")
+        elif tag == "preference":
+            name, value = attrs.get("name", ""), attrs.get("value", "")
+            for pref, test, sev, title, why in _CORDOVA_PREFS:
+                if name.lower() == pref.lower() and test(value):
+                    findings.add(sev, title, why, evidence=f'<preference name="{name}" value="{value}" />',
+                                 location=loc, confidence="confirmed")
+        elif tag == "plugin":
+            if attrs.get("name"):
+                hy.setdefault("config_plugins", {})[attrs["name"]] = attrs.get("spec") or attrs.get("version") or ""
+
+    # plugin inventory with versions
+    versions = _plugin_versions(app_dir, web_root)
+    for fw in hy.get("plugins", []):                         # iOS: embedded frameworks carry their own version
+        ip = os.path.join(app_dir, "Frameworks", fw + ".framework", "Info.plist")
+        if os.path.isfile(ip) and fw not in versions:
+            try:
+                with open(ip, "rb") as fh:
+                    v = plistlib.load(fh).get("CFBundleShortVersionString")
+                if v:
+                    versions.setdefault(fw + " (framework)", str(v))
+            except Exception:
+                pass
+    cap_plugins = os.path.join(app_dir, "assets", "capacitor.plugins.json") if os.path.isdir(os.path.join(app_dir, "assets")) \
+        else os.path.join(app_dir, "capacitor.plugins.json")
+    if os.path.isfile(cap_plugins):
+        try:
+            for item in json.load(open(cap_plugins, encoding="utf-8")):
+                if isinstance(item, dict) and item.get("pkg"):
+                    versions.setdefault(item["pkg"], "")
+        except (ValueError, OSError):
+            pass
+    if versions:
+        hy["plugin_versions"] = dict(sorted(versions.items()))
+        findings.add("INFO", f"{len(versions)} plugin(s) bundled" + (" (versions from cordova_plugins.js)" if any(versions.values()) else ""),
+                     "Plugins expose native capabilities to the JavaScript layer. Check them against known "
+                     "vulnerabilities (`appsleuth sbom --cves` covers native libraries).",
+                     evidence=", ".join(f"{k} {v}".strip() for k, v in sorted(versions.items())[:40]), confidence="confirmed")
+
+    # Content-Security-Policy in the entry page
+    index = next((os.path.join(web_root, n) for n in ("index.html",) if web_root and os.path.isfile(os.path.join(web_root, n))), None)
+    if index:
+        rel = os.path.relpath(index, app_dir).replace(os.sep, "/")
+        try:
+            html = open(index, "rb").read(2_000_000)
+        except OSError:
+            html = b""
+        metas = _CSP_META_RE.findall(html)
+        if not metas:
+            findings.add("MEDIUM", "No Content-Security-Policy in index.html",
+                         "Without a CSP, any script injected into the WebView (a compromised third-party script, XSS in "
+                         "rendered content) can run freely and reach the native bridge. Add a <meta "
+                         "http-equiv=\"Content-Security-Policy\"> restricting script-src to 'self'.",
+                         location=rel, confidence="confirmed")
+        else:
+            policy = ""
+            for tagtext in metas:
+                cm = _CSP_CONTENT_RE.search(tagtext)
+                if cm:
+                    policy += (cm.group(1) or cm.group(2) or b"").decode("utf-8", "replace") + ";"
+            problems = _csp_problems(policy)
+            if problems:
+                findings.add("LOW", "Weak Content-Security-Policy in index.html",
+                             "The policy exists but does little to stop injected scripts: " + "; ".join(problems) + ".",
+                             evidence=policy[:300], location=rel, confidence="heuristic")
+            hy["csp"] = policy[:300]
+
+
 def analyze_hybrid_web(app_dir: str, frameworks: List[str], findings: "FindingsBag", meta: Dict[str, Any],
                        scan_label: str, android: bool = False):
     """Capacitor / Cordova apps ship most of their logic as readable web files plus a
@@ -2575,6 +2775,19 @@ def analyze_hybrid_web(app_dir: str, frameworks: List[str], findings: "FindingsB
                           "webContentsDebuggingEnabled=true lets anyone with the device attach Safari's Web "
                           "Inspector to the app's WebView and read/modify its runtime state.",
                           location=loc, confidence="confirmed")
+        droid = cfg.get("android") or {}
+        if droid.get("webContentsDebuggingEnabled"):
+            findings.add("MEDIUM", "WebView debugging enabled in release config",
+                          "android.webContentsDebuggingEnabled=true lets anyone with USB access attach Chrome "
+                          "DevTools to the app's WebView.", location=loc, confidence="confirmed")
+        if droid.get("allowMixedContent"):
+            findings.add("MEDIUM", "Capacitor allows mixed content (android.allowMixedContent)",
+                          "HTTPS pages may load scripts and resources over plaintext HTTP, which a network "
+                          "attacker can modify.", location=loc, confidence="confirmed")
+        if str(server.get("androidScheme", "")).lower() == "http" or str(server.get("iosScheme", "")).lower() == "http":
+            findings.add("MEDIUM", "Capacitor serves the app over http:// (server.androidScheme/iosScheme)",
+                          "The bundled app is served from an http:// origin, which weakens secure-context features "
+                          "and allows plaintext content to mix with it.", location=loc, confidence="confirmed")
         if str(cfg.get("loggingBehavior", "")).lower() == "debug":
             findings.add("LOW", "Capacitor verbose logging enabled (loggingBehavior=debug)",
                           "Debug logging can leak request data and tokens into device logs.", location=loc,
@@ -2610,10 +2823,21 @@ def analyze_hybrid_web(app_dir: str, frameworks: List[str], findings: "FindingsB
                           "page can reach native plugins or navigate the WebView anywhere.",
                           evidence=hit[1], location=hit[3], confidence="confirmed")
 
+    # ---- other config checks, plugin inventory, CSP ----
+    cfg_entries, cfg_name = [], None
+    if droid_cordova:
+        cfg_name, cfg_entries = droid_cordova
+    elif os.path.isfile(cordova_cfg):
+        try:
+            cfg_entries, cfg_name = _xml_entries(open(cordova_cfg, "rb").read()), "config.xml"
+        except OSError:
+            pass
+    analyze_hybrid_config(app_dir, web_root, cfg_entries, cfg_name or "config.xml", findings, meta, frameworks)
+
     # ---- web assets ----
     if not web_root:
         return
-    maps, blobs, total, skipped = [], [], 0, 0
+    maps, blobs, blob_names, total, skipped = [], [], [], 0, 0
     for root, _dirs, files in os.walk(web_root):
         for fn in sorted(files):
             full = os.path.join(root, fn)
@@ -2632,6 +2856,7 @@ def analyze_hybrid_web(app_dir: str, frameworks: List[str], findings: "FindingsB
                     skipped += 1
                     continue
                 blobs.append(open(full, "rb").read())
+                blob_names.append(rel)
                 total += size
             except OSError:
                 continue
@@ -2652,7 +2877,8 @@ def analyze_hybrid_web(app_dir: str, frameworks: List[str], findings: "FindingsB
         return
     blob = b"\n".join(blobs)
     label = f"{scan_label} web assets ({os.path.basename(web_root)}/)"
-    scan_bytes_for_patterns(blob, label, findings, web_layer=True)
+    scan_bytes_for_patterns(blob, label, findings, web_layer=True,
+                            locate=file_line_locator(blob_names, blobs))
 
     hits = sorted({m.decode(errors="replace") for m in _WEB_STORAGE_RE.findall(blob)})
     if hits:
@@ -2894,7 +3120,8 @@ def analyze_ipa(path: str, workdir: str) -> Tuple[FindingsBag, Dict[str, Any]]:
                               "available.")
 
             blob = open(bin_path, 'rb').read()
-            scan_bytes_for_patterns(blob, f"{os.path.basename(path)}:{executable_name}", findings)
+            scan_bytes_for_patterns(blob, f"{os.path.basename(path)}:{executable_name}", findings,
+                                    locate=offset_locator(executable_name))
             # (Entropy scanning is skipped here: Mach-O strings aren't structured into a
             # single string pool the way DEX is, so a whole-binary entropy scan is far
             # noisier -- it would mostly flag ordinary compiled/linked binary data.)
@@ -3221,8 +3448,9 @@ def detect_kind(path: str) -> str:
     return "unknown"
 
 
-def scan(path: str, outdir: str, save_extracted: bool = True) -> Dict[str, Any]:
-    os.makedirs(outdir, exist_ok=True)
+def scan(path: str, outdir: str, save_extracted: bool = True, write_reports: bool = True) -> Dict[str, Any]:
+    if write_reports or save_extracted:
+        os.makedirs(outdir, exist_ok=True)
     workdir = tempfile.mkdtemp(prefix="appsleuth_")
     try:
         kind = detect_kind(path)
@@ -3254,11 +3482,11 @@ def scan(path: str, outdir: str, save_extracted: bool = True) -> Dict[str, Any]:
         },
     }
 
-    with open(os.path.join(outdir, "report.json"), "w") as f:
-        json.dump(result, f, indent=2, default=str)
-
-    write_markdown_report(result, os.path.join(outdir, "report.md"))
-    write_html_report(result, os.path.join(outdir, "report.html"))
+    if write_reports:
+        with open(os.path.join(outdir, "report.json"), "w") as f:
+            json.dump(result, f, indent=2, default=str)
+        write_markdown_report(result, os.path.join(outdir, "report.md"))
+        write_html_report(result, os.path.join(outdir, "report.html"))
     return result
 
 
@@ -3561,8 +3789,10 @@ def write_diff_markdown(diff: Dict[str, Any], path: str):
 _RECOGNISED_EXTS = (".apk", ".apks", ".xapk", ".apkm", ".aab", ".ipa", ".tipa")
 
 
-def batch_scan(directory: str, outdir: str, recursive: bool = False, save_extracted: bool = True) -> Dict[str, Any]:
-    os.makedirs(outdir, exist_ok=True)
+def batch_scan(directory: str, outdir: str, recursive: bool = False, save_extracted: bool = True,
+               write_reports: bool = True) -> Dict[str, Any]:
+    if write_reports or save_extracted:
+        os.makedirs(outdir, exist_ok=True)
     targets = []
     walker = os.walk(directory) if recursive else [(directory, [], os.listdir(directory))]
     for dirpath, _dirs, files in walker:
@@ -3575,7 +3805,7 @@ def batch_scan(directory: str, outdir: str, recursive: bool = False, save_extrac
     for t in targets:
         sub_outdir = os.path.join(outdir, re.sub(r'\W+', '_', os.path.splitext(os.path.basename(t))[0]))
         try:
-            result = scan(t, sub_outdir, save_extracted)
+            result = scan(t, sub_outdir, save_extracted, write_reports)
             per_file.append({"file": t, "outdir": sub_outdir, "detected_type": result["detected_type"],
                               "summary": result["summary"], "error": None})
         except Exception as e:
@@ -3585,6 +3815,8 @@ def batch_scan(directory: str, outdir: str, recursive: bool = False, save_extrac
     per_file.sort(key=lambda r: -(r["summary"]["HIGH"] * 1000 + r["summary"]["MEDIUM"] * 10 + r["summary"]["LOW"])
                   if r["summary"] else 0)
     batch_result = {"directory": os.path.abspath(directory), "count": len(targets), "results": per_file}
+    if not write_reports:
+        return batch_result
     with open(os.path.join(outdir, "batch_summary.json"), "w") as fh:
         json.dump(batch_result, fh, indent=2, default=str)
 

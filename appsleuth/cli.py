@@ -136,14 +136,18 @@ def cmd_scan(a):
         die(f"file not found: {a.target}", 2)
     outdir = a.outdir or f"scan_{os.path.splitext(os.path.basename(a.target.rstrip('/')))[0]}"
     if os.path.isdir(a.target):
-        b = engine.batch_scan(a.target, outdir, recursive=a.recursive, save_extracted=a.keep_extracted)
+        b = engine.batch_scan(a.target, outdir, recursive=a.recursive, save_extracted=a.keep_extracted,
+                              write_reports=a.report)
         log = sys.stderr if a.format == "json" else sys.stdout      # --format json: stdout is pure JSON
         if a.format == "json":
             print(json.dumps(b, indent=2, default=str))
-        print(f"Scanned {b['count']} file(s) under {a.target}; summary in {outdir}/batch_summary.md", file=log)
+        print(f"Scanned {b['count']} file(s) under {a.target}" +
+              (f"; summary in {outdir}/batch_summary.md" if a.report else ""), file=log)
         for r in b["results"]:
             if r["error"]:
                 print(f"  ! {r['file']}: {r['error']}", file=log)
+            elif a.format != "json":
+                print(f"  {os.path.basename(r['file'])}: {_counts(r['summary'])}", file=log)
         return
 
     rules = _rules(a, a.target)
@@ -163,7 +167,7 @@ def cmd_scan(a):
         print(f"Baseline written to {a.write_baseline}", file=sys.stderr if a.format == "json" else sys.stdout)
 
     found = bool(result["findings"] or result.get("suppressed_count") or result.get("warnings"))
-    if found:
+    if found and a.report:
         write_reports(result, outdir)
     if result.get("warnings") and a.format != "json":
         for w in result["warnings"]:
@@ -175,12 +179,13 @@ def cmd_scan(a):
         ident = m.get("package") or m.get("bundle_id") or os.path.basename(a.target)
         ver = m.get("versionName") or m.get("version") or ""
         print(Term.c(f"{ident} {ver}", "bold") + f"  [{result['detected_type'].upper()}]")
-        print_findings(result, verbose=a.verbose, show=a.show)
+        print_findings(result, verbose=a.verbose, show=a.show, report=a.report)
         print()
     log = sys.stderr if a.format == "json" else sys.stdout          # --format json: stdout is pure JSON
     print(_counts(result["summary"]) + (f"   ({result['suppressed_count']} hidden)" if result.get("suppressed_count") else ""),
           file=log)
-    print(f"Reports: {outdir}/report.html  report.md  report.json" if found else NOTHING, file=log)
+    if a.report:
+        print(f"Reports: {outdir}/report.html  report.md  report.json" if found else NOTHING, file=log)
 
     if a.fail_on:
         worst = max((_SEV_RANK[f["severity"]] for f in result["findings"]), default=-1)
@@ -234,11 +239,12 @@ def cmd_diff(a):
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     outdir = a.outdir or f"diff_{os.path.splitext(os.path.basename(a.old))[0]}_vs_{os.path.splitext(os.path.basename(a.new))[0]}"
-    os.makedirs(outdir, exist_ok=True)
-    with open(os.path.join(outdir, "diff.json"), "w", encoding="utf-8") as fh:
-        json.dump(d, fh, indent=2, default=str)
-    with open(os.path.join(outdir, "diff.md"), "w", encoding="utf-8") as fh:
-        fh.write(diff_mod.render_markdown(d))
+    if a.report:
+        os.makedirs(outdir, exist_ok=True)
+        with open(os.path.join(outdir, "diff.json"), "w", encoding="utf-8") as fh:
+            json.dump(d, fh, indent=2, default=str)
+        with open(os.path.join(outdir, "diff.md"), "w", encoding="utf-8") as fh:
+            fh.write(diff_mod.render_markdown(d))
 
     if a.format == "json":
         print(json.dumps(d, indent=2, default=str))
@@ -255,7 +261,8 @@ def cmd_diff(a):
             print(f"  {Term.c('[' + r['severity'] + ']', r['severity'])} {r['text']}")
         f = d["findings"]
         print(f"\nFindings: {len(f['new'])} new, {len(f['resolved'])} resolved")
-        print(f"Report: {outdir}/diff.md  diff.json")
+        if a.report:
+            print(f"Report: {outdir}/diff.md  diff.json")
     if a.fail_on_regression:
         if any(_SEV_RANK[r["severity"]] >= _SEV_RANK[a.fail_on_regression] for r in d["regressions"]):
             print(f"--fail-on-regression {a.fail_on_regression}: regression found.", file=sys.stderr)
@@ -283,8 +290,12 @@ def _found(res: Dict[str, Any], kind: str) -> bool:
 
 
 def _intel_report(res: Dict[str, Any], a, title: str, default_dir: str):
-    """Triage, print and write reports. Returns (result, outdir), outdir None when nothing was found."""
+    """Triage and print; write reports only with --report. Returns (result, outdir), outdir None when no files are written."""
     res = triage.apply(res, rules=_rules(a, a.target), min_severity=a.min_severity, corroborate=False)
+    if not a.report:
+        print(f"{os.path.basename(a.target)}: {_counts(res['summary'])}")
+        print_findings(res, verbose=a.verbose, show=a.show, report=False)
+        return res, None
     if not _found(res, default_dir):
         print(f"{os.path.basename(a.target)}: {NOTHING}")
         print_findings(res, verbose=a.verbose, show=a.show, report=False)
@@ -368,12 +379,20 @@ def cmd_runtime(a):
     res = runtime.events_to_result(events, platform, a.target)
     res = triage.apply(res, rules=_rules(a, a.target), min_severity=a.min_severity, corroborate=False)
     out = a.outdir or f"runtime_{a.target}"
-    write_reports(res, out, "Runtime probe")
+    if a.dump_events:
+        n = runtime.dump_events(events, a.dump_events)
+        print(f"[+] {n} raw events written to {a.dump_events} (values redacted)", file=sys.stderr)
+    if a.report:
+        write_reports(res, out, "Runtime probe")
     print(f"\n{_counts(res['summary'])}   ({res['meta']['events']} events observed)")
-    print_findings(res, verbose=a.verbose, show=a.show)
+    print_findings(res, verbose=a.verbose, show=a.show, report=a.report)
+    bl = runtime.breakdown_lines(res, color=Term.c)
+    if bl:
+        print("\n" + "\n".join(bl))
     if res["meta"]["events"] == 0:
         print("No events were observed. Is frida-server running, and did you use the app during the window?")
-    print(f"Reports: {out}/report.html  report.md  report.json")
+    if a.report:
+        print(f"Reports: {out}/report.html  report.md  report.json")
 
 
 def cmd_data(a):
@@ -382,12 +401,15 @@ def cmd_data(a):
     def audit_and_report(root: str, platform: str, out: str, manifest=None, keychain=None):
         res = dataaudit.audit_dir(root, platform, reveal=not a.redact, manifest=manifest, keychain=keychain)
         res = triage.apply(res, rules=_rules(a, root), min_severity=a.min_severity, corroborate=False)
-        write_reports(res, out, "App data audit")
+        if a.report:
+            write_reports(res, out, "App data audit")
         print(f"\n{_counts(res['summary'])}")
-        print_findings(res, verbose=a.verbose, show=a.show)
-        for ln in dataaudit.keychain_lines(keychain):
-            print(ln if not ln.startswith("Keychain") else "\n" + Term.c(ln, "id"))
-        print(f"Reports: {out}/report.html  report.md  report.json")
+        print_findings(res, verbose=a.verbose, show=a.show, report=a.report)
+        kc_lines = dataaudit.keychain_lines(keychain if not a.redact else dataaudit.mask_keychain(keychain), color=Term.c)
+        if kc_lines:
+            print("\n" + "\n".join(kc_lines))
+        if a.report:
+            print(f"Reports: {out}/report.html  report.md  report.json")
         return res
 
     if a.audit_dir:
@@ -434,6 +456,19 @@ def cmd_data(a):
                 keychain = devdata.ios_pull_keychain(ssh, app["bundle_id"])
             except devdata.PullError as e:
                 print(f"[!] Keychain not read: {e}")
+            if not a.no_keychain_values:
+                from . import runtime
+                print("[*] Reading keychain values on the device (Frida) ...")
+                try:
+                    read = runtime.read_keychain_values(app["bundle_id"], device_id=a.device, host=a.frida_host)
+                    keychain = dataaudit.merge_keychain_values(keychain or {"bundle_id": app["bundle_id"], "items": []}, read)
+                    got = sum(1 for i in keychain["items"] if i.get("value") is not None)
+                    print(f"[+] {got} of {len(keychain['items'])} keychain value(s) read" +
+                          (" (app was launched for this and closed again)" if read.get("spawned") else ""))
+                    for err in read.get("errors", []):
+                        print(f"[!] {err}")
+                except Exception as e:
+                    print(f"[!] Keychain values not read: {e}")
         else:
             serials = devdata.android_devices()
             if not serials:
@@ -515,6 +550,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("scan", help="static security scan of an app (or a directory of apps)")
     s.add_argument("target", help=".apk .apks .xapk .apkm .aab .ipa .tipa, or a directory (batch)")
     s.add_argument("-o", "--outdir")
+    s.add_argument("--report", action="store_true", help="also write the report files (default: terminal output only)")
     s.add_argument("--recursive", action="store_true", help="batch: recurse into subdirectories")
     s.add_argument("--keep-extracted", action="store_true", help="keep the unpacked app in <outdir>/extracted")
     s.add_argument("--fail-on", choices=["HIGH", "MEDIUM", "LOW", "INFO"], help="exit 3 if a finding >= this remains")
@@ -539,6 +575,7 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("old")
     d.add_argument("new")
     d.add_argument("-o", "--outdir")
+    d.add_argument("--report", action="store_true", help="also write the report files (default: terminal output only)")
     d.add_argument("--format", choices=["text", "json"], default="text")
     d.add_argument("--fail-on-regression", choices=["HIGH", "MEDIUM", "LOW"], help="exit 4 on a regression >= this")
     d.add_argument("-v", "--verbose", action="store_true", help="also list informational changes")
@@ -563,6 +600,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Android access method (default: try root, run-as, backup)")
     g.add_argument("--max-mb", type=int, default=2048, help="refuse containers larger than this")
     g.add_argument("-o", "--outdir")
+    g.add_argument("--no-keychain-values", action="store_true",
+                   help="iOS: skip reading keychain VALUES (by default they are read by a read-only query run inside the app "
+                        "with Frida; needs frida-server, launches the app if it is not running; --redact masks them)")
+    g.add_argument("--keychain-values", action="store_true", help=argparse.SUPPRESS)      # now the default
+    g.add_argument("--device", help="iOS: Frida device id (default: USB)")
+    g.add_argument("--frida-host", help="iOS: connect to frida-server over the network at HOST[:PORT]")
+    g.add_argument("--report", action="store_true", help="also write report.html / report.md / report.json (default: terminal output only)")
     g.add_argument("--no-audit", action="store_true", help="only pull; skip the storage audit")
     g.add_argument("--no-keep-data", action="store_true", help="delete the pulled data after auditing")
     g.add_argument("--redact", action="store_true", help="mask found secret values in the report (default: shown in full)")
@@ -582,6 +626,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--device", help="Frida device id (default: USB)")
     r.add_argument("--frida-host", help="connect to frida-server over the network at HOST[:PORT]")
     r.add_argument("-o", "--outdir")
+    r.add_argument("--report", action="store_true", help="also write the report files (default: terminal output only)")
+    r.add_argument("--dump-events", metavar="FILE", help="write every observed event to FILE as JSON lines (values redacted)")
     r.add_argument("--show", choices=["HIGH", "MEDIUM", "LOW", "INFO"], default="LOW")
     r.add_argument("-v", "--verbose", action="store_true")
     r.add_argument("--ignore-file")
@@ -591,6 +637,7 @@ def build_parser() -> argparse.ArgumentParser:
         p = sub.add_parser(name, help=helptext)
         p.add_argument("target", help="IPA, APK, APKS/XAPK or AAB")
         p.add_argument("-o", "--outdir")
+        p.add_argument("--report", action="store_true", help="also write the report files (default: terminal output only)")
         p.add_argument("--show", choices=["HIGH", "MEDIUM", "LOW", "INFO"], default="LOW")
         p.add_argument("-v", "--verbose", action="store_true")
         p.add_argument("--ignore-file")

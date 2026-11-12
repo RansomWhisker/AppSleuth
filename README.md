@@ -60,7 +60,7 @@ named `sub_<address>`. FairPlay-encrypted binaries get no code cross-references 
     appsleuth data --android -p com.example.app --method auto
     appsleuth data --audit-dir ./pulled --platform android
 
-Reports (`report.json/md/html`) are written to `-o DIR`. A baseline keeps matching when the app file is renamed (for
+Output goes to the terminal. Add `--report` (any command) to also write `report.json/md/html` to `-o DIR`; without it no report files are created. A baseline keeps matching when the app file is renamed (for
 example a new build downloaded as `app-2.0.apk`): the file name is not part of a finding's identity.
 
 **Encrypted IPAs:** if the main binary (or a framework) is still FairPlay-encrypted, AppSleuth cannot see its code, so it prints a warning and puts it at the top of every report. A clean result on such a file does not mean the app is secure; re-dump it decrypted and scan again.
@@ -92,7 +92,9 @@ Observe what a running app really does, using Frida: root/jailbreak checks, plai
     appsleuth runtime --android com.example.app --seconds 90
     appsleuth runtime --ios com.example.app --spawn
 
-Android hooks: `File.exists`, `Runtime.exec`, OkHttp `CertificatePinner`, `URL.openConnection`, `Cipher`, `MessageDigest`, `SharedPreferences` writes, `Log`, WebView debugging. iOS: file/URL/`NSURLSession` cleartext, `NSUserDefaults`, keychain accessibility, jailbreak-file checks, logging.
+Android hooks: `File.exists`, `Runtime.exec`, OkHttp `CertificatePinner`, `URL.openConnection`, `Cipher`, `MessageDigest`, `SharedPreferences` writes, `Log`, WebView debugging. iOS: every `NSURLSessionTask` (so URLSession, Alamofire, AFNetworking), `NSURLConnection`, CFNetwork, raw `connect()` sockets (Flutter/Dart and custom stacks), DNS lookups, `SecTrust` evaluation and trust overrides, URLSession challenge delegates (pinning), WKWebView loads and `isInspectable`, cleartext URLs, `NSUserDefaults`, keychain accessibility, jailbreak-file checks, logging.
+
+Each run ends with a per-hook table (calls, events recorded, hooks that stayed silent, hooks that could not be installed) and a coverage warning when the app resolved host names but no hooked networking API saw a request. `--dump-events FILE` writes every event as JSON lines (values redacted).
 
 It is **observe-only** (no bypasses, nothing patched) and never stores values, only key names and descriptions. Use the app during the window: it can only report what it sees. **Status:** tested on a real jailbroken iPhone (Dopamine, Frida 17) and a rooted Pixel 6a (Android 16, Frida 17.15). On Android, `--spawn` falls back to a delayed attach if an app crashes under early instrumentation, and attaching to a running app finds it by package name. The `pip` Frida version must match the `frida-server` on the phone. Only calls made while the probe runs are visible, and results are leads, not proof. Probes count only calls from the app's own code, not from the jailbreak's tweak loader.
 
@@ -106,6 +108,8 @@ It is **observe-only** (no bypasses, nothing patched) and never stores values, o
 Findings are leads for manual review, not confirmed vulnerabilities; each carries a `confidence`.
 
 ## `appsleuth data` safety
+
+On iOS, `data` also reads the app's keychain: item metadata over SSH (`keychain-2.db`) and, by default, the item **values**, through a read-only `SecItemCopyMatching` query run inside the app with Frida (needs frida-server; the app is launched and closed again if it is not running). Only items the app itself can read are returned; `--no-keychain-values` skips the Frida step and `--redact` masks values in the output. Values are saved in `keychain.json` (mode 600). A keychain secret that also appears verbatim in the app's data files is reported as HIGH.
 
 Found values (tokens, passwords, keys, headers) are **shown in full** so you can verify and reproduce a finding; the reports therefore contain real credentials, so treat them as sensitive. Add `--redact` to mask values instead. Pulled archives are extracted defensively (regular files only, no links, no traversal, size/count caps); SQLite is opened read-only with an authorizer; XML with a DOCTYPE is refused; host/user/package inputs are validated and shell-quoted. Only use it on devices and apps you are authorised to test.
 
