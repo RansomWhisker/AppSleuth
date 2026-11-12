@@ -116,12 +116,20 @@ class Finding:
 class FindingsBag:
     def __init__(self):
         self.items: List[Finding] = []
+        self.secrets: List[Dict[str, Any]] = []     # every key/token/secret value found, in full
 
     def add(self, severity, title, detail, evidence=None, location=None, confidence="heuristic"):
         self.items.append(Finding(severity, title, detail, evidence, location, confidence))
 
+    def add_secret(self, kind, value, severity, location=None):
+        value = value[:2000]
+        if not any(x["type"] == kind and x["value"] == value and x["location"] == location for x in self.secrets):
+            self.secrets.append({"type": kind, "value": value, "severity": severity, "location": location})
+
     def extend(self, other: "FindingsBag"):
         self.items.extend(other.items)
+        for x in other.secrets:
+            self.add_secret(x["type"], x["value"], x["severity"], x["location"])
 
     def sorted(self):
         return sorted(self.items, key=lambda f: -SEVERITY_ORDER.get(f.severity, 0))
@@ -1108,6 +1116,8 @@ def scan_bytes_for_patterns(blob: bytes, source_label: str, findings: FindingsBa
                 continue
             sev, title, extra, conf = verdict
             snippet = token[:60].decode('utf-8', errors='replace')
+            findings.add_secret(name, token.decode('utf-8', errors='replace'), sev,
+                                _resolve_dex_location(dexfile, snippet, source_label))
             findings.add(sev, title,
                           f"A string matching the shape of a {name} was found embedded in {source_label}. "
                           f"Client binaries can always be extracted and read, so anything credential-like "
@@ -1817,6 +1827,8 @@ def entropy_scan_strings(strings_iterable, source_label: str, findings: Findings
     if not hits:
         return
     hits.sort(key=lambda t: -t[1])
+    for tok, _ent in hits:
+        findings.add_secret("High-entropy string", tok, "LOW", source_label)
     shown = hits[:max_report]
     evidence_parts = [f"{tok[:40]}{'…' if len(tok) > 40 else ''} (entropy={ent:.1f})" for tok, ent in shown]
     loc = source_label
@@ -3153,6 +3165,7 @@ def scan(path: str, outdir: str, save_extracted: bool = True) -> Dict[str, Any]:
         else:
             raise ValueError(unrecognised_message(path))
         meta["detected_type"] = kind
+        meta["secrets"] = findings.secrets
         if save_extracted:
             shutil.copytree(workdir, os.path.join(outdir, "extracted"), dirs_exist_ok=True)
     finally:

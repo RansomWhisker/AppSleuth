@@ -52,6 +52,18 @@ def _base_meta(meta: Dict[str, Any]) -> Dict[str, Any]:
     return meta
 
 
+def _all_secrets(meta: Dict[str, Any], extra: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Every key/token/secret value the scan saw (pattern hits, high-entropy strings, Firebase config keys)."""
+    out = [dict(x) for x in (meta.get("secrets") or [])]
+    seen = {x["value"] for x in out}
+    for loc, v in extra.items():
+        if isinstance(v, str) and v and v not in seen:
+            out.append({"type": "Firebase/Google API key", "value": v, "severity": "INFO", "location": loc})
+            seen.add(v)
+    order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2, "INFO": 3}
+    return sorted(out, key=lambda x: (order.get(x["severity"], 4), x["type"], x["value"]))
+
+
 def summarize(result: Dict[str, Any], path: Optional[str] = None) -> Dict[str, Any]:
     """Normalise a scan result (engine.scan output) into a flat, comparable summary."""
     kind = result.get("detected_type")
@@ -95,6 +107,7 @@ def summarize(result: Dict[str, Any], path: Optional[str] = None) -> Dict[str, A
             "encryption": m.get("macho_encryption_verified") or m.get("macho_encryption") or [],
             "embedded_binaries_still_encrypted": m.get("embedded_binaries_still_encrypted") or [],
             "hybrid": m.get("hybrid") or {},
+            "secrets": _all_secrets(meta, {"API_KEY (GoogleService-Info.plist)": (m.get("google_service_info") or {}).get("API_KEY")}),
             "privacy_manifests": sorted((m.get("privacy_manifests") or {}).keys()),
             "firebase": m.get("google_service_info") or {},
             "hardening": m.get("macho_hardening") or {},
@@ -102,7 +115,10 @@ def summarize(result: Dict[str, Any], path: Optional[str] = None) -> Dict[str, A
     else:
         perms = sorted(m.get("permissions") or [])
         certs = m.get("signing_certs") or []
+        fb = m.get("google_firebase_config") or {}
         s.update({
+            "secrets": _all_secrets(meta, {"google_api_key (resources)": fb.get("google_api_key"),
+                                           "google_crash_reporting_api_key (resources)": fb.get("google_crash_reporting_api_key")}),
             "id": m.get("package"), "version": m.get("versionName"), "build": m.get("versionCode"),
             "min_os": m.get("minSdkVersion"), "target_sdk": m.get("targetSdkVersion"),
             "name": m.get("app_label_resolved"),
@@ -560,6 +576,21 @@ def render_text(s: Dict[str, Any], *, full: bool = False) -> str:
         L.append(f"Hybrid app: {hy.get('framework')}  (web layer: {hy.get('web_files_scanned')} files)")
         _kv(L, "Plugins", ", ".join(hy.get("plugins") or []))
         _kv(L, "External hosts", ", ".join((hy.get("external_hosts") or [])[: (60 if full else 8)]))
+
+    sec = s.get("secrets") or []
+    L.append("")
+    L.append(f"API keys & secrets found ({len(sec)})")
+    if not sec:
+        L.append("  " + good("(none)"))
+    elif not full:
+        L.append("  " + dim("use --full to list every value (shown unmasked; treat the output as sensitive)"))
+    else:
+        for x in sec:
+            col = {"HIGH": bad, "MEDIUM": warn}.get(x["severity"], dim)
+            L.append("  " + col(f"[{x['severity']}] {x['type']}"))
+            L.append("    " + x["value"])
+            if x.get("location"):
+                L.append("    " + dim(f"in {x['location']}"))
 
     sb = s.get("sbom") or []
     if sb:
