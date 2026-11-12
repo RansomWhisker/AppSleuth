@@ -270,6 +270,60 @@ def ios_pull(ssh: SSH, app: Dict[str, Any], out_dir: str, max_bytes: int = DEFAU
     return manifest
 
 
+KEYCHAIN_DB = ("/var/Keychains/keychain-2.db", "/private/var/Keychains/keychain-2.db")
+_KC_TABLES = (("genp", "password"), ("inet", "internet password"), ("cert", "certificate"),
+              ("keys", "key"), ("idnt", "identity"))
+
+
+def _kc_text(v: Any) -> str:
+    if isinstance(v, (bytes, bytearray)):
+        return bytes(v).decode("utf-8", "replace") if all(32 <= b < 127 or b >= 128 for b in v) else v.hex()
+    return "" if v is None else str(v)
+
+
+def ios_pull_keychain(ssh: SSH, bundle_id: str, max_bytes: int = 64 << 20) -> Dict[str, Any]:
+    """Item metadata (class, service, account, access group, accessibility) for the app's keychain items.
+    Secret values stay encrypted in the keychain database and are not read. Needs root."""
+    import sqlite3
+    work = private_tmpdir("appsleuth_kc_")
+    try:
+        remote = next((p for p in KEYCHAIN_DB
+                       if ssh.run(f"test -f {shlex.quote(p)} && echo y", check=False).strip() == "y"), None)
+        if not remote:
+            raise PullError("keychain-2.db not found on the device (is it jailbroken and the SSH user root?)")
+        local = os.path.join(work, "keychain-2.db")
+        for suffix in ("", "-wal", "-shm"):
+            if suffix and ssh.run(f"test -f {shlex.quote(remote + suffix)} && echo y", check=False).strip() != "y":
+                continue
+            ssh.stream_to_file(f"cat {shlex.quote(remote + suffix)}", local + suffix, max_bytes)
+        con = sqlite3.connect(local)
+        con.text_factory = bytes
+        items: List[Dict[str, Any]] = []
+        try:
+            for table, kind in _KC_TABLES:
+                cols = {r[1].decode() if isinstance(r[1], bytes) else r[1]
+                        for r in con.execute(f"PRAGMA table_info({table})")}
+                if not {"agrp", "pdmn"} <= cols:
+                    continue
+                want = [c for c in ("acct", "svce", "srvr", "labl", "agrp", "pdmn", "cdat", "mdat", "sync") if c in cols]
+                for row in con.execute(f"SELECT {', '.join(want)} FROM {table}"):
+                    d = {c: _kc_text(v) for c, v in zip(want, row)}
+                    grp = d.get("agrp", "")
+                    if grp == bundle_id or grp.endswith("." + bundle_id) or bundle_id in grp:
+                        items.append({"class": kind, "service": d.get("svce") or d.get("srvr", ""),
+                                      "account": d.get("acct", ""), "label": d.get("labl", ""),
+                                      "group": grp, "accessible": d.get("pdmn", ""),
+                                      "synchronizable": d.get("sync") in ("1", "true")})
+        finally:
+            con.close()
+    except sqlite3.DatabaseError as e:
+        raise PullError(f"could not read the keychain database: {e}")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return {"bundle_id": bundle_id, "items": items, "pulled_at": int(time.time()),
+            "note": "metadata only; secret values are encrypted in the keychain and not read"}
+
+
 # ----------------------------------------------------------------------- Android
 
 def _adb(args: List[str], serial: Optional[str] = None, **kw):

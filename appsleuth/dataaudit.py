@@ -256,8 +256,70 @@ def _audit_sqlite(path: str, rel: str, add, reveal: bool, meta: Dict[str, Any]):
 
 # ------------------------------------------------------------------------ audit
 
+# kSecAttrAccessible, as stored in the keychain's `pdmn` column.
+KEYCHAIN_ACCESS = {
+    "ak": "kSecAttrAccessibleWhenUnlocked",
+    "ck": "kSecAttrAccessibleAfterFirstUnlock",
+    "dk": "kSecAttrAccessibleAlways",
+    "aku": "kSecAttrAccessibleWhenUnlockedThisDeviceOnly",
+    "cku": "kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly",
+    "dku": "kSecAttrAccessibleAlwaysThisDeviceOnly",
+    "akpu": "kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly",
+}
+
+
+def keychain_access_name(code: str) -> str:
+    return KEYCHAIN_ACCESS.get((code or "").strip(), f"unknown ({code})" if code else "unknown")
+
+
+def keychain_lines(kc: Optional[Dict[str, Any]]) -> List[str]:
+    """Plain-text table of the app's keychain items, with their accessibility class."""
+    items = (kc or {}).get("items") or []
+    if not items:
+        return []
+    out = [f"Keychain items for this app ({len(items)}); values are encrypted and not read"]
+    for it in items:
+        name = it.get("service") or it.get("label") or "(no service)"
+        acct = f" / {it['account']}" if it.get("account") else ""
+        out.append(f"  [{it['class']}] {name}{acct}")
+        out.append(f"      {keychain_access_name(it.get('accessible', ''))}   group: {it.get('group', '')}")
+    return out
+
+
+def _keychain_findings(kc: Dict[str, Any], add) -> None:
+    items = kc.get("items") or []
+    if not items:
+        add("INFO", "No keychain items found for this app",
+            "The keychain database has no items whose access group matches this bundle id.",
+            confidence="confirmed")
+        return
+    by: Dict[str, List[Dict[str, Any]]] = {}
+    for it in items:
+        by.setdefault(it.get("accessible", ""), []).append(it)
+
+    def ev(group):
+        return "; ".join(f"[{i['class']}] {i.get('service') or i.get('label') or '?'}"
+                         f"{' / ' + i['account'] if i.get('account') else ''}" for i in group[:25]) + \
+            (f"; ... +{len(group) - 25} more" if len(group) > 25 else "")
+
+    for code, group in sorted(by.items()):
+        name = keychain_access_name(code)
+        if code in ("dk", "dku"):
+            add("MEDIUM", f"Keychain items readable while the device is locked ({name})",
+                f"{len(group)} item(s) use {name}: they can be read at any time, even before the first unlock "
+                "after boot. This class is deprecated; use WhenUnlocked (or WhenPasscodeSet) for credentials.",
+                evidence=ev(group), location="keychain-2.db", confidence="confirmed")
+        else:
+            add("INFO", f"Keychain items: {len(group)} with {name}",
+                "Accessibility class of keychain items belonging to this app. "
+                + ("ThisDeviceOnly items are excluded from backups and device migration. " if code.endswith("u") else "")
+                + ("AfterFirstUnlock items stay readable on a locked device until the next reboot." if code in ("ck", "cku") else ""),
+                evidence=ev(group), location="keychain-2.db", confidence="confirmed")
+
+
 def audit_dir(root: str, platform: str = "ios", *, reveal: bool = True,
-              manifest: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+              manifest: Optional[Dict[str, Any]] = None,
+              keychain: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Audit an extracted data container. Returns a scan-style result dict."""
     findings: List[Dict[str, Any]] = []
     meta: Dict[str, Any] = {"platform": platform, "root": os.path.abspath(root)}
@@ -407,6 +469,9 @@ def audit_dir(root: str, platform: str = "ios", *, reveal: bool = True,
             "similar encrypted stores look like. This is a positive signal.", evidence=", ".join(enc[:6]),
             confidence="heuristic")
 
+    if keychain is not None:
+        meta["keychain"] = keychain
+        _keychain_findings(keychain, add)
     meta.update({"files": n_files, "bytes": total, "by_type": dict(types),
                  "largest": [{"path": r, "bytes": s} for s, r in sorted(sizes, reverse=True)[:8]]})
     findings.sort(key=lambda f: -_SEV[f["severity"]])

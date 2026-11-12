@@ -379,25 +379,34 @@ def cmd_runtime(a):
 def cmd_data(a):
     from . import dataaudit, devdata
 
-    def audit_and_report(root: str, platform: str, out: str, manifest=None):
-        res = dataaudit.audit_dir(root, platform, reveal=not a.redact, manifest=manifest)
+    def audit_and_report(root: str, platform: str, out: str, manifest=None, keychain=None):
+        res = dataaudit.audit_dir(root, platform, reveal=not a.redact, manifest=manifest, keychain=keychain)
         res = triage.apply(res, rules=_rules(a, root), min_severity=a.min_severity, corroborate=False)
         write_reports(res, out, "App data audit")
         print(f"\n{_counts(res['summary'])}")
         print_findings(res, verbose=a.verbose, show=a.show)
+        for ln in dataaudit.keychain_lines(keychain):
+            print(ln if not ln.startswith("Keychain") else "\n" + Term.c(ln, "id"))
         print(f"Reports: {out}/report.html  report.md  report.json")
         return res
 
     if a.audit_dir:
         if not os.path.isdir(a.audit_dir):
             die(f"not a directory: {a.audit_dir}", 2)
-        audit_and_report(a.audit_dir, a.platform or "ios", a.outdir or "data_audit")
+        kc = None
+        for cand in (os.path.join(a.audit_dir, "keychain.json"), os.path.join(os.path.dirname(os.path.abspath(a.audit_dir)), "keychain.json")):
+            if os.path.isfile(cand):
+                with open(cand, encoding="utf-8") as fh:
+                    kc = json.load(fh)
+                break
+        audit_and_report(a.audit_dir, a.platform or "ios", a.outdir or "data_audit", keychain=kc)
         return
 
     plat = "android" if a.android else "ios" if a.ios else a.platform
     if not plat:
         die("choose a source: --ios, --android, or --audit-dir DIR", 2)
     cap = a.max_mb << 20
+    keychain = None
     try:
         if plat == "ios":
             host, user, pw = a.host or os.environ.get("APPSLEUTH_HOST"), a.user, os.environ.get("SSH_PASSWORD")
@@ -420,6 +429,11 @@ def cmd_data(a):
             out = os.path.join(a.outdir or "appdata", devdata.clean(app["bundle_id"]))
             print(f"[*] Pulling data container for {app['bundle_id']} ...")
             manifest = devdata.ios_pull(ssh, app, os.path.join(out, "data"), cap)
+            try:
+                print("[*] Reading keychain item metadata ...")
+                keychain = devdata.ios_pull_keychain(ssh, app["bundle_id"])
+            except devdata.PullError as e:
+                print(f"[!] Keychain not read: {e}")
         else:
             serials = devdata.android_devices()
             if not serials:
@@ -438,6 +452,10 @@ def cmd_data(a):
         die(str(e), 1)
 
     os.chmod(out, 0o700)
+    if keychain is not None:
+        with open(os.path.join(out, "keychain.json"), "w", encoding="utf-8") as fh:
+            json.dump(keychain, fh, indent=1)
+        os.chmod(os.path.join(out, "keychain.json"), 0o600)
     mf = {k: v for k, v in manifest.items() if k != "modes"}
     with open(os.path.join(out, "pull_manifest.json"), "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=1)
@@ -445,7 +463,7 @@ def cmd_data(a):
     if mf.get("skipped_links_or_special"):
         print(f"    ({mf['skipped_links_or_special']} symlinks/special files skipped)")
     if not a.no_audit:
-        audit_and_report(os.path.join(out, "data"), plat, out, manifest)
+        audit_and_report(os.path.join(out, "data"), plat, out, manifest, keychain if plat == "ios" else None)
     print(Term.c("Note: the pulled data contains real user data and tokens. Treat it as sensitive; "
                  "delete it when done (or re-run with --no-keep-data).", "dim"))
     if a.no_keep_data:
