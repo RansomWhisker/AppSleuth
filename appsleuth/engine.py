@@ -2518,6 +2518,10 @@ def analyze_hybrid_web(app_dir: str, frameworks: List[str], findings: "FindingsB
                 (b"access", b"origin", "Cordova <access origin=\"*\"> allows requests to any host"),
                 (b"allow-navigation", b"href", "Cordova <allow-navigation href=\"*\"> allows any navigation"),
                 (b"allow-intent", b"href", "Cordova <allow-intent href=\"*\"> allows opening any URL scheme")):
+            for m in re.finditer(rb"<" + tag + rb"\b[^>]*\b" + attr + rb"\s*=\s*[\"']\*[\"'][^>]*>", xml):
+                meta["hybrid"].setdefault("config_lines", []).append({
+                    "file": "config.xml", "line": xml.count(b"\n", 0, m.start()) + 1,
+                    "text": m.group(0).decode("utf-8", "replace")})
             if re.search(rb"<" + tag + rb"\b[^>]*\b" + attr + rb"\s*=\s*[\"']\*[\"']", xml):
                 findings.add("MEDIUM", title,
                               "Wildcard whitelist entries remove Cordova's origin restrictions, so any loaded "

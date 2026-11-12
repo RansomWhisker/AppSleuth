@@ -531,6 +531,12 @@ def render_text(s: Dict[str, Any], *, full: bool = False) -> str:
         L.append("")
         L.append("App Transport Security (ATS)")
         L.extend(ats_lines(ats))
+        cl = (s.get("hybrid") or {}).get("config_lines") or []
+        if cl:
+            L.append("")
+            L.append("Cordova whitelist (wildcards)")
+            for e in cl:
+                L.append("  " + bad(e["text"]) + dim(f"   {e['file']}:{e['line']}"))
     else:
         L.extend(perms_mod.android_permission_lines(perms, s.get("dangerous_permissions") or [], full=full))
         comps = [c for c in (s.get("exported_components") or []) if not c.get("launcher")]
