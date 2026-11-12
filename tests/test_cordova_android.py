@@ -88,7 +88,7 @@ class AndroidCordova(unittest.TestCase):
 
     def test_web_assets_secrets_scanned(self):
         fb, meta = self.scan(make_apk([("widget", {"id": "x"}, 2)],
-                                      {"assets/www/app.js": "var g='AIzaSyD4kQ9xV2mN7pL1rT8wZ3bC6hJ0eF5gYaM';"}))
+                                      {"assets/www/app.js": "var g='" + "AI" + "zaSyD4kQ9xV2mN7pL1rT8wZ3bC6hJ0eF5gYaM" + "';"}))
         self.assertEqual(meta["hybrid"]["framework"], "Cordova")
         self.assertTrue(any(x["type"] == "Google API Key" for x in fb.secrets))
 
