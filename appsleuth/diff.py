@@ -19,7 +19,7 @@ _SEV = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3}
 # Flags that, when switched ON in the new build, are regressions (and how bad).
 RISK_FLAGS = {
     "debuggable": "HIGH", "get_task_allow": "HIGH", "ats_disabled": "HIGH", "cleartext_allowed": "HIGH",
-    "remote_web_content": "HIGH", "user_ca_trusted": "MEDIUM", "webview_debugging": "MEDIUM",
+    "remote_web_content": "HIGH", "cordova_access_any_origin": "MEDIUM", "cordova_navigation_any_host": "MEDIUM", "cordova_intent_any_url": "MEDIUM", "capacitor_navigation_any_host": "MEDIUM", "user_ca_trusted": "MEDIUM", "webview_debugging": "MEDIUM",
     "allow_backup": "MEDIUM", "file_sharing": "MEDIUM", "no_cert_pinning": "LOW",
 }
 

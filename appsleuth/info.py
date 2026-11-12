@@ -20,6 +20,10 @@ FLAG_TITLES = {
     "get_task_allow": ("Provisioning profile allows debugging",),
     "webview_debugging": ("WebView debugging enabled in release config",),
     "remote_web_content": ("Capacitor loads app content from a remote URL",),
+    "cordova_access_any_origin": ("Cordova <access origin=",),
+    "cordova_navigation_any_host": ("Cordova <allow-navigation",),
+    "cordova_intent_any_url": ("Cordova <allow-intent",),
+    "capacitor_navigation_any_host": ("Capacitor allowNavigation permits any host",),
     "main_binary_encrypted": ("Main binary is still FairPlay-encrypted",),
     "file_sharing": ("iTunes/Finder file sharing enabled",),
 }
