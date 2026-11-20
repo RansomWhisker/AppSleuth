@@ -35,7 +35,8 @@ def _jsonable_events(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [e for e in events if isinstance(e, dict) and isinstance(e.get("t"), str)][:MAX_EVENTS]
 
 
-def events_to_result(events: Iterable[Dict[str, Any]], platform: str, target: str = "") -> Dict[str, Any]:
+def events_to_result(events: Iterable[Dict[str, Any]], platform: str, target: str = "",
+                     reveal: bool = True) -> Dict[str, Any]:
     """Pure function: probe events -> scan-style result dict (testable without a device)."""
     ev = _jsonable_events(events)
     findings: List[Dict[str, Any]] = []
@@ -138,21 +139,23 @@ def events_to_result(events: Iterable[Dict[str, Any]], platform: str, target: st
         kind_ = dataaudit.sensitive_key(key)
         if not kind_:
             continue
-        desc, strong = dataaudit.classify_value(e.get("value", ""))
-        if desc in ("empty", "scalar", "short string"):
-            continue
+        raw = e.get("value", "")
+        desc, strong = dataaudit.classify_value(raw)
+        if desc in ("empty", "scalar", "short string") and not (reveal and str(raw).strip()):
+            continue            # when revealing, short passwords / PINs are exactly what we want to see
         sev = "HIGH" if strong else "MEDIUM"
         if dataaudit.is_session_id_key(key):          # analytics/SDK session ids, not login credentials
             sev, kind_ = "LOW", "session identifier"
         if key not in bad or sev == "HIGH":
-            bad[key] = (sev, kind_, desc)
-    for key, (sev, kind_, desc) in sorted(bad.items()):
+            bad[key] = (sev, kind_, desc, raw)
+    for key, (sev, kind_, desc, raw) in sorted(bad.items()):
         store = "SharedPreferences" if platform == "android" else "NSUserDefaults"
+        shown = f"{key} = {raw}" if reveal else f"{key}: {desc}"
         add(sev, f"Credential-like value written to {store} in plaintext",
             f"Key `{key}` ({kind_}, {desc}) is stored unencrypted. Use the Keystore/Keychain instead."
             + (" Session ids written by analytics SDKs are usually harmless; check whether it authenticates the user."
                if kind_ == "session identifier" else ""),
-            evidence=f"{key}: {desc}", conf="confirmed" if sev == "HIGH" else "heuristic")
+            evidence=shown, conf="confirmed" if sev == "HIGH" else "heuristic")
 
     # secrets in logs
     seen = set()
@@ -163,7 +166,8 @@ def events_to_result(events: Iterable[Dict[str, Any]], platform: str, target: st
                 seen.add(what)
                 add("HIGH" if what != "JWT" else "MEDIUM", f"{what} written to the system log",
                     "Log output is readable by other tools on the device (and by anyone with adb/Console). "
-                    "Remove it from release builds.", evidence=f"tag={e.get('tag', '')}")
+                    "Remove it from release builds.",
+                    evidence=f"tag={e.get('tag', '')}" + (f" msg={msg}" if reveal else ""))
 
     verifiers = sorted({e.get("cls", "") for e in by.get("hostname_verifier", []) if e.get("cls")})
     if verifiers:
@@ -305,13 +309,13 @@ def redact_event(e: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def dump_events(events: Iterable[Dict[str, Any]], path: str) -> int:
-    """Write the raw event stream as JSON lines (values redacted). Returns the number of lines."""
+def dump_events(events: Iterable[Dict[str, Any]], path: str, redact: bool = False) -> int:
+    """Write the raw event stream as JSON lines (values kept unless redact=True). Returns the number of lines."""
     import json
     n = 0
     with open(path, "w", encoding="utf-8") as fh:
         for e in _jsonable_events(events):
-            fh.write(json.dumps(redact_event(e), sort_keys=True) + "\n")
+            fh.write(json.dumps(redact_event(e) if redact else e, sort_keys=True) + "\n")
             n += 1
     os.chmod(path, 0o600)
     return n

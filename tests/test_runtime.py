@@ -12,10 +12,12 @@ def titles(events, platform="android"):
 
 
 class RuntimeFindings(unittest.TestCase):
-    def test_credential_in_prefs_high_and_never_stored(self):
+    def test_credential_in_prefs_high_and_shown_unless_redacted(self):
         t, r = titles([{"t": "prefs_write", "key": "auth_token", "value": JWT}])
         self.assertEqual(t[0][0], "HIGH")
-        self.assertNotIn(JWT, json.dumps(r))
+        self.assertIn(JWT, json.dumps(r))
+        red = runtime.events_to_result([{"t": "prefs_write", "key": "auth_token", "value": JWT}], "android", "x", reveal=False)
+        self.assertNotIn(JWT, json.dumps(red))
 
     def test_benign_prefs_ignored(self):
         t, _ = titles([{"t": "prefs_write", "key": "isLoggedIn", "value": "true"},
@@ -117,12 +119,27 @@ class Breakdown(unittest.TestCase):
         path = os.path.join(tempfile.mkdtemp(), "ev.jsonl")
         n = runtime.dump_events([{"t": "prefs_write", "key": "auth_token", "value": JWT},
                                  {"t": "log", "tag": "x", "msg": "Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345"},
-                                 {"t": "net", "host": "a.example.com"}], path)
+                                 {"t": "net", "host": "a.example.com"}], path, redact=True)
         text = open(path).read()
         self.assertEqual(n, 3)
         self.assertNotIn(JWT, text)
         self.assertNotIn("abcdefghijklmnop", text)
         self.assertIn("a.example.com", text)
+
+    def test_values_shown_by_default(self):
+        import os, tempfile
+        ev = [{"t": "prefs_write", "key": "user_password", "value": "hunter2"},
+              {"t": "prefs_write", "key": "auth_token", "value": JWT},
+              {"t": "log", "tag": "x", "msg": "password=hunter2xyz"}]
+        text = str(runtime.events_to_result(ev, "android", "x")["findings"])
+        self.assertIn("hunter2", text)
+        self.assertIn(JWT, text)
+        red = str(runtime.events_to_result(ev, "android", "x", reveal=False)["findings"])
+        self.assertNotIn("hunter2", red)
+        self.assertNotIn(JWT, red)
+        path = os.path.join(tempfile.mkdtemp(), "ev.jsonl")
+        runtime.dump_events(ev, path)
+        self.assertIn("hunter2", open(path).read())
 
 
 if __name__ == "__main__":
@@ -139,7 +156,7 @@ class RuntimeFalsePositives(unittest.TestCase):
     def test_analytics_session_id_is_low_not_high(self):
         ev = [{"t": "prefs_write", "key": "session_id", "value": "0123456789abcdef0123456789abcdef"},
               {"t": "prefs_write", "key": "authToken", "value": "0123456789abcdef0123456789abcdef"}]
-        sev = {f["evidence"].split(":")[0]: f["severity"] for f in runtime.events_to_result(ev, "android", "x")["findings"]}
+        sev = {f["evidence"].split(" = ")[0]: f["severity"] for f in runtime.events_to_result(ev, "android", "x")["findings"]}
         self.assertEqual(sev, {"session_id": "LOW", "authToken": "HIGH"})
 
 

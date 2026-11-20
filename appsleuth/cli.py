@@ -376,12 +376,12 @@ def cmd_runtime(a):
         if type(e).__name__ == "TimedOutError":
             hint = " (the app did not start under Frida; launch it by hand and run again without --spawn)"
         die(f"runtime probe failed: {type(e).__name__}: {e}{hint}", 1)
-    res = runtime.events_to_result(events, platform, a.target)
+    res = runtime.events_to_result(events, platform, a.target, reveal=not a.redact)
     res = triage.apply(res, rules=_rules(a, a.target), min_severity=a.min_severity, corroborate=False)
     out = a.outdir or f"runtime_{a.target}"
     if a.dump_events:
-        n = runtime.dump_events(events, a.dump_events)
-        print(f"[+] {n} raw events written to {a.dump_events} (values redacted)", file=sys.stderr)
+        n = runtime.dump_events(events, a.dump_events, redact=a.redact)
+        print(f"[+] {n} raw events written to {a.dump_events} (values {'redacted' if a.redact else 'included'})", file=sys.stderr)
     if a.report:
         write_reports(res, out, "Runtime probe")
     print(f"\n{_counts(res['summary'])}   ({res['meta']['events']} events observed)")
@@ -627,7 +627,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--frida-host", help="connect to frida-server over the network at HOST[:PORT]")
     r.add_argument("-o", "--outdir")
     r.add_argument("--report", action="store_true", help="also write the report files (default: terminal output only)")
-    r.add_argument("--dump-events", metavar="FILE", help="write every observed event to FILE as JSON lines (values redacted)")
+    r.add_argument("--dump-events", metavar="FILE", help="write every observed event to FILE as JSON lines (values included unless --redact)")
+    r.add_argument("--redact", action="store_true", help="hide captured values (passwords, tokens, log lines); by default everything captured is shown")
     r.add_argument("--show", choices=["HIGH", "MEDIUM", "LOW", "INFO"], default="LOW")
     r.add_argument("-v", "--verbose", action="store_true")
     r.add_argument("--ignore-file")
