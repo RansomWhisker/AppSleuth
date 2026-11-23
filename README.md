@@ -115,6 +115,15 @@ Observe what a running app really does, using Frida: root/jailbreak checks, plai
 
 Android hooks: `File.exists`, `Runtime.exec`, OkHttp `CertificatePinner`, `URL.openConnection`, `Cipher`, `MessageDigest`, `SharedPreferences` writes, `Log`, WebView debugging. iOS: every `NSURLSessionTask` (so URLSession, Alamofire, AFNetworking), `NSURLConnection`, CFNetwork, raw `connect()` sockets (Flutter/Dart and custom stacks), DNS lookups, `SecTrust` evaluation and trust overrides, URLSession challenge delegates (pinning), WKWebView loads and `isInspectable`, cleartext URLs, `NSUserDefaults`, keychain accessibility, jailbreak-file checks, logging.
 
+**Dump crypto:** `appsleuth runtime --android com.example.app --dump-crypto [FILE]` also records every crypto operation
+the app performs, with its **key, IV, input and output** (hex, plus a text preview when the data is printable), and prints
+them after the run: a "Keys and IVs" summary, then each operation in order. Android hooks `Cipher` (init / update /
+doFinal), `Mac`, `MessageDigest.digest` and `SecretKeySpec`; iOS hooks CommonCrypto (`CCCrypt`, `CCCryptor*`, `CCHmac`,
+`CC_MD5` / `CC_SHA*`) when called from the app's own code and embedded frameworks (CryptoKit and direct corecrypto calls are
+not covered). Keys that live in the Android Keystore / Secure Enclave cannot be read and are reported as not extractable.
+`FILE` also saves the operations as JSON lines (mode 600, full hex up to 4 KB per value); `--redact` hides values. Observed
+all-zero IVs and key+IV reuse become findings. Keys and plaintext are shown in full, so treat the output as sensitive.
+
 Each run ends with a per-hook table (calls, events recorded, hooks that stayed silent, hooks that could not be installed) and a coverage warning when the app resolved host names but no hooked networking API saw a request. `--dump-events FILE` writes every event as JSON lines. Captured values (passwords, tokens, log lines) are **shown in full** by default; add `--redact` to mask them.
 
 It is **observe-only** (no bypasses, nothing patched) and never stores values, only key names and descriptions. Use the app during the window: it can only report what it sees. **Status:** tested on a real jailbroken iPhone (Dopamine, Frida 17) and a rooted Pixel 6a (Android 16, Frida 17.15). On Android, `--spawn` falls back to a delayed attach if an app crashes under early instrumentation, and attaching to a running app finds it by package name. The `pip` Frida version must match the `frida-server` on the phone. Only calls made while the probe runs are visible, and results are leads, not proof. Probes count only calls from the app's own code, not from the jailbreak's tweak loader.

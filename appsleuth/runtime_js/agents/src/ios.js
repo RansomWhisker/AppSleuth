@@ -276,3 +276,107 @@ if (ObjC.available) {
   });
 }
 emit('ready', { platform: 'ios' });
+
+
+// --- crypto operations with keys, IVs and data (only with --dump-crypto) ---------------------
+// The host posts {type:'config', crypto:true} after loading. Covers CommonCrypto (CCCrypt, CCCryptor*, CCHmac and
+// the CC_MD5 / CC_SHA* one-shots) called from the app's own code and embedded frameworks. CryptoKit and
+// corecrypto called directly are not covered.
+var CRYPTO_CAP = 3000, cryptoSent = 0, CRYPTO_BYTES = 4096;
+var CC_ALG = ['AES', 'DES', '3DES', 'CAST', 'RC4', 'RC2', 'Blowfish'];
+var HMAC_ALG = ['SHA1', 'MD5', 'SHA256', 'SHA384', 'SHA512', 'SHA224'];
+function hexAt(p, n) {
+  if (!p || p.isNull() || n <= 0) return null;
+  try {
+    var m = Math.min(n, CRYPTO_BYTES), b = new Uint8Array(p.readByteArray(m)), s = '';
+    for (var i = 0; i < b.length; i++) s += (b[i] + 0x100).toString(16).slice(1);
+    return s;
+  } catch (e) { return null; }
+}
+function cryptoSend(o) {
+  if (cryptoSent++ >= CRYPTO_CAP) return;
+  send(Object.assign({ t: 'crypto' }, o));
+}
+function cc(name, cb) {
+  tryHook(function () {
+    var addr = Module.getGlobalExportByName(name);
+    if (!addr) return;
+    Interceptor.attach(addr, cb);
+  });
+}
+function installCrypto() {
+  cc('CCCrypt', {
+    onEnter: function (a) {
+      this.ok = fromApp(this.returnAddress);
+      if (!this.ok) return;
+      this.op = a[0].toInt32(); this.alg = a[1].toInt32(); this.opts = a[2].toInt32();
+      this.key = a[3]; this.keyLen = a[4].toInt32(); this.iv = a[5];
+      this.inp = a[6]; this.inLen = a[7].toInt32(); this.out = a[8]; this.moved = a[10];
+    },
+    onLeave: function () {
+      if (!this.ok) return;
+      var outLen = 0; try { outLen = this.moved.isNull() ? 0 : this.moved.readUInt(); } catch (e) {}
+      cryptoSend({ kind: 'cipher', alg: (CC_ALG[this.alg] || 'alg' + this.alg) + ((this.opts & 2) ? '/ECB' : '/CBC') +
+                   ((this.opts & 1) ? '/PKCS7Padding' : '/NoPadding'),
+                   mode: this.op === 0 ? 'encrypt' : 'decrypt', key: hexAt(this.key, this.keyLen), key_len: this.keyLen,
+                   iv: (this.opts & 2) ? null : hexAt(this.iv, 16),
+                   input: hexAt(this.inp, this.inLen), in_len: this.inLen, output: hexAt(this.out, outLen), out_len: outLen });
+    }
+  });
+  var cryptors = {};
+  cc('CCCryptorCreate', {
+    onEnter: function (a) {
+      this.ok = fromApp(this.returnAddress);
+      if (!this.ok) return;
+      this.info = { op: a[0].toInt32(), alg: a[1].toInt32(), opts: a[2].toInt32(), key: a[3], keyLen: a[4].toInt32(), iv: a[5] };
+      this.ref = a[6];
+    },
+    onLeave: function () {
+      if (!this.ok) return;
+      var i = this.info;
+      try { cryptors[this.ref.readPointer().toString()] = i; } catch (e) {}
+      cryptoSend({ kind: 'cipher_init', alg: (CC_ALG[i.alg] || 'alg' + i.alg) + ((i.opts & 2) ? '/ECB' : '/CBC') +
+                   ((i.opts & 1) ? '/PKCS7Padding' : '/NoPadding'),
+                   mode: i.op === 0 ? 'encrypt' : 'decrypt', key: hexAt(i.key, i.keyLen), key_len: i.keyLen,
+                   iv: (i.opts & 2) ? null : hexAt(i.iv, 16) });
+    }
+  });
+  cc('CCCryptorUpdate', {
+    onEnter: function (a) {
+      this.ok = fromApp(this.returnAddress);
+      if (!this.ok) return;
+      this.ref = a[0].toString(); this.inp = a[1]; this.inLen = a[2].toInt32(); this.out = a[3]; this.moved = a[5];
+    },
+    onLeave: function () {
+      if (!this.ok) return;
+      var outLen = 0; try { outLen = this.moved.isNull() ? 0 : this.moved.readUInt(); } catch (e) {}
+      var i = cryptors[this.ref];
+      cryptoSend({ kind: 'cipher_update', alg: i ? (CC_ALG[i.alg] || 'alg' + i.alg) : 'CCCryptor',
+                   input: hexAt(this.inp, this.inLen), in_len: this.inLen, output: hexAt(this.out, outLen), out_len: outLen });
+    }
+  });
+  cc('CCHmac', {
+    onEnter: function (a) {
+      this.ok = fromApp(this.returnAddress);
+      if (!this.ok) return;
+      this.alg = a[0].toInt32(); this.key = a[1]; this.keyLen = a[2].toInt32();
+      this.data = a[3]; this.dataLen = a[4].toInt32(); this.mac = a[5];
+    },
+    onLeave: function () {
+      if (!this.ok) return;
+      var n = { 0: 20, 1: 16, 2: 32, 3: 48, 4: 64, 5: 28 }[this.alg] || 32;
+      cryptoSend({ kind: 'mac', alg: 'HMAC-' + (HMAC_ALG[this.alg] || this.alg), key: hexAt(this.key, this.keyLen), key_len: this.keyLen,
+                   input: hexAt(this.data, this.dataLen), in_len: this.dataLen, output: hexAt(this.mac, n), out_len: n });
+    }
+  });
+  [['CC_MD5', 'MD5', 16], ['CC_SHA1', 'SHA-1', 20], ['CC_SHA256', 'SHA-256', 32], ['CC_SHA512', 'SHA-512', 64]].forEach(function (d) {
+    cc(d[0], {
+      onEnter: function (a) { this.ok = fromApp(this.returnAddress); this.data = a[0]; this.len = a[1].toInt32(); this.md = a[2]; },
+      onLeave: function () {
+        if (!this.ok) return;
+        cryptoSend({ kind: 'digest', alg: d[1], input: hexAt(this.data, this.len), in_len: this.len, output: hexAt(this.md, d[2]), out_len: d[2] });
+      }
+    });
+  });
+}
+recv('config', function (m) { if (m && m.crypto) installCrypto(); });

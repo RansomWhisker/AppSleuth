@@ -462,7 +462,8 @@ def cmd_runtime(a):
           "(log in, browse, trigger network calls); Ctrl+C ends early.", file=sys.stderr)
     try:
         events = runtime.run_probe(platform, a.target, seconds=a.seconds, spawn=a.spawn,
-                                   device_id=a.device, host=a.frida_host)
+                                   device_id=a.device, host=a.frida_host,
+                                   crypto=a.dump_crypto is not None)
     except RuntimeError as e:
         die(str(e), 2)
     except Exception as e:      # frida raises its own error types
@@ -479,10 +480,15 @@ def cmd_runtime(a):
     if a.dump_events:
         n = runtime.dump_events(events, a.dump_events, redact=a.redact)
         print(f"[+] {n} raw events written to {a.dump_events} (values {'redacted' if a.redact else 'included'})", file=sys.stderr)
+    if a.dump_crypto not in (None, "-"):
+        n = runtime.dump_crypto(events, a.dump_crypto, redact=a.redact)
+        print(f"[+] {n} crypto operation(s) written to {a.dump_crypto} (JSON lines, mode 600)", file=sys.stderr)
     if a.report:
         write_reports(res, out, "Runtime probe")
     print(f"\n{_counts(res['summary'])}   ({res['meta']['events']} events observed)")
     print_findings(res, verbose=a.verbose, show=a.show, report=a.report)
+    if a.dump_crypto is not None:
+        print("\n" + "\n".join(runtime.crypto_lines(events, reveal=not a.redact, color=Term.c)))
     bl = runtime.breakdown_lines(res, color=Term.c)
     if bl:
         print("\n" + "\n".join(bl))
@@ -725,6 +731,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("-o", "--outdir")
     r.add_argument("--report", action="store_true", help="also write the report files (default: terminal output only)")
     r.add_argument("--dump-events", metavar="FILE", help="write every observed event to FILE as JSON lines (values included unless --redact)")
+    r.add_argument("--dump-crypto", nargs="?", const="-", metavar="FILE",
+                   help="also record every crypto operation with its key, IV, input and output (Android: Cipher, Mac, "
+                        "MessageDigest, SecretKeySpec; iOS: CommonCrypto from the app's own code) and print them; "
+                        "give FILE to also save them as JSON lines")
     r.add_argument("--redact", action="store_true", help="hide captured values (passwords, tokens, log lines); by default everything captured is shown")
     r.add_argument("--show", choices=["HIGH", "MEDIUM", "LOW", "INFO"], default="LOW")
     r.add_argument("-v", "--verbose", action="store_true")

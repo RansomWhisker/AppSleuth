@@ -169,6 +169,25 @@ def events_to_result(events: Iterable[Dict[str, Any]], platform: str, target: st
                     "Remove it from release builds.",
                     evidence=f"tag={e.get('tag', '')}" + (f" msg={msg}" if reveal else ""))
 
+    # crypto misuse seen by --dump-crypto
+    ivs: Dict[Any, set] = {}
+    for e in by.get("crypto", []):
+        iv = e.get("iv")
+        if iv and e.get("mode") == "encrypt" and "ECB" not in str(e.get("alg", "")):
+            ivs.setdefault((e.get("alg"), e.get("key"), iv), set()).add(e.get("kind"))
+    zero = sorted({a for (a, _k, iv) in ivs if iv and set(iv) == {"0"}})
+    if zero:
+        add("MEDIUM", "All-zero IV used for encryption (observed)",
+            "A constant IV makes CBC/CTR encryption of repeated or similar data predictable; use a random IV per message.",
+            evidence=", ".join(zero[:6]))
+    seen_enc = Counter((e.get("alg"), e.get("key"), e.get("iv")) for e in by.get("crypto", [])
+                       if e.get("kind") in ("cipher", "cipher_init") and e.get("mode") == "encrypt" and e.get("iv"))
+    fixed = sorted({k[0] for k, n in seen_enc.items() if n > 1})
+    if fixed:
+        add("MEDIUM", "Same key and IV reused for several encryptions (observed)",
+            "Reusing an IV with the same key breaks the confidentiality guarantees of CBC / CTR / GCM.",
+            evidence=", ".join(fixed[:6]), conf="heuristic")
+
     verifiers = sorted({e.get("cls", "") for e in by.get("hostname_verifier", []) if e.get("cls")})
     if verifiers:
         loose = [v for v in verifiers if re.search(r"(?i)allow.?all|trust.?all|insecure|accept.?all|null.?host|no.?op", v)]
@@ -298,6 +317,83 @@ def breakdown_lines(result: Dict[str, Any], color=None) -> List[str]:
 _VALUE_KEYS = ("value", "msg")
 
 
+def _hex_to_bytes(h: Optional[str]) -> bytes:
+    try:
+        return bytes.fromhex(h) if h else b""
+    except ValueError:
+        return b""
+
+
+def _preview(h: Optional[str], total: int, reveal: bool) -> str:
+    """hex -> `<hex> | "<text>"` (text only when it is mostly printable); redacted to a length when not reveal."""
+    if h is None:
+        return "-"
+    if not reveal:
+        return f"<{total} bytes>"
+    raw = _hex_to_bytes(h)
+    out = h + ("…" if total > len(raw) else "")
+    try:
+        txt = raw.decode("utf-8")
+        if txt and sum(c.isprintable() or c in "\r\n\t" for c in txt) >= 0.9 * len(txt):
+            out += '   "' + txt.replace("\n", "\\n").replace("\r", "\\r")[:200] + '"'
+    except UnicodeDecodeError:
+        pass
+    return out
+
+
+def crypto_events(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [e for e in _jsonable_events(events) if e.get("t") == "crypto"]
+
+
+def crypto_lines(events: Iterable[Dict[str, Any]], reveal: bool = True, color=None) -> List[str]:
+    """Terminal view of everything --dump-crypto captured: keys and IVs first, then each operation in order."""
+    ce = crypto_events(events)
+    c = color or (lambda s, _k=None: s)
+    if not ce:
+        return [c("No crypto operations were observed. Use the app (log in, open protected screens) while it runs; "
+                  "iOS only sees CommonCrypto calls made by the app's own code.", "dim")]
+    L = [c(f"Crypto operations ({len(ce)})", "bold")]
+    keys: Dict[Any, Dict[str, Any]] = {}
+    for e in ce:
+        if e.get("key") is not None or e.get("key_note"):
+            keys.setdefault((e.get("alg"), e.get("key"), e.get("iv")), e)
+    if keys:
+        L.append("")
+        L.append("  Keys and IVs")
+        for (alg, key, iv), e in keys.items():
+            kl = e.get("key_len") or 0
+            what = _preview(key, kl, reveal).split("   ")[0] if key else c(e.get("key_note") or "no key bytes", "dim")
+            L.append(f"    {alg}  key[{kl}] {what}" + (f"  iv {_preview(iv, 16, reveal).split('   ')[0]}" if iv else ""))
+    L.append("")
+    L.append("  Operations")
+    for i, e in enumerate(ce, 1):
+        kind = e.get("kind", "")
+        head = f"    {i:>3}. {kind}  {e.get('alg', '')}" + (f"  {e['mode']}" if e.get("mode") else "")
+        L.append(head)
+        if kind in ("cipher_init", "mac_init", "key"):
+            continue
+        if e.get("input") is not None:
+            L.append(f"         in  ({e.get('in_len', 0)} B)  {_preview(e['input'], e.get('in_len', 0), reveal)}")
+        if e.get("output") is not None:
+            L.append(f"         out ({e.get('out_len', 0)} B)  {_preview(e['output'], e.get('out_len', 0), reveal)}")
+    return L
+
+
+def dump_crypto(events: Iterable[Dict[str, Any]], path: str, redact: bool = False) -> int:
+    """Write crypto events as JSON lines (full hex, mode 600). Returns the number of lines."""
+    import json
+    n = 0
+    with open(path, "w", encoding="utf-8") as fh:
+        for e in crypto_events(events):
+            if redact:
+                e = {k: (f"<{(e.get(k + '_len') or e.get('key_len') or 0)} bytes>" if k in ("key", "iv", "input", "output") and v else v)
+                     for k, v in e.items()}
+            fh.write(json.dumps(e, sort_keys=True) + "\n")
+            n += 1
+    os.chmod(path, 0o600)
+    return n
+
+
 def redact_event(e: Dict[str, Any]) -> Dict[str, Any]:
     """An event safe to write to disk: values become a description, log lines are masked if they hold a secret."""
     out = dict(e)
@@ -367,8 +463,10 @@ def _check_server_compat(frida, dev) -> None:
 
 
 def run_probe(platform: str, target: str, *, seconds: int = 60, spawn: bool = False,
-              device_id: Optional[str] = None, host: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Attach (or spawn) with Frida and collect events for `seconds`. Needs the frida module."""
+              device_id: Optional[str] = None, host: Optional[str] = None,
+              crypto: bool = False) -> List[Dict[str, Any]]:
+    """Attach (or spawn) with Frida and collect events for `seconds`. Needs the frida module.
+    crypto=True also records keys, IVs and data of crypto operations (event type 'crypto')."""
     try:
         import frida  # type: ignore
     except ImportError:
@@ -408,8 +506,10 @@ def run_probe(platform: str, target: str, *, seconds: int = 60, spawn: bool = Fa
         script.load()
         if platform == "android":          # the Android agent installs its hooks when it gets this
             skip = [x for x in os.environ.get("APPSLEUTH_SKIP_HOOKS", "").split(",") if x]
-            script.post({"type": "config", "skip": skip,
+            script.post({"type": "config", "skip": skip, "crypto": crypto,
                          "delay_ms": int(os.environ.get("APPSLEUTH_HOOK_DELAY_MS", "0") or 0)})
+        elif crypto:                       # the iOS agent adds its CommonCrypto hooks on this
+            script.post({"type": "config", "crypto": True})
         if not resume_first and spawn:
             dev.resume(pid)
         return session, script

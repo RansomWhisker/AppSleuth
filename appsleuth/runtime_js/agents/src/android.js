@@ -3,9 +3,26 @@
 'use strict';
 import Java from 'frida-java-bridge';
 function emit(t, o) { send(Object.assign({ t: t }, o || {})); }
+// Java byte[] -> {hex, len}; never throws. Used by --dump-crypto only.
+function hexOf(b, from, n) {
+  if (b === null || b === undefined) return null;
+  try {
+    var len = b.length, start = from || 0, end = n === undefined ? len : Math.min(len, start + n);
+    var cap = Math.min(end, start + CRYPTO_BYTES), s = '';
+    for (var i = start; i < cap; i++) s += ((b[i] & 0xff) + 0x100).toString(16).slice(1);
+    return { hex: s, len: end - start };
+  } catch (e) { return null; }
+}
+function cryptoEmit(o) {
+  if (cryptoSent++ >= CRYPTO_CAP) return;
+  emit('crypto', o);
+}
 function trunc(s, n) { s = String(s); return s.length > n ? s.slice(0, n) : s; }
 
 var SKIP = [];
+var CRYPTO = false;
+var CRYPTO_CAP = 3000, cryptoSent = 0;
+var CRYPTO_BYTES = 4096;
 function install() {
   function tryHook(name, fn) {
     if (SKIP.indexOf(name) >= 0) return;
@@ -109,6 +126,106 @@ function install() {
     });
   });
 
+  // --- crypto operations with keys, IVs and data (only with --dump-crypto) ---------------------
+  if (CRYPTO) {
+    tryHook('crypto_cipher_init', function () {
+      var Cipher = Java.use('javax.crypto.Cipher');
+      Cipher.init.overloads.forEach(function (ov) {
+        var t = ov.argumentTypes.map(function (x) { return x.className; });
+        if (t.length < 2 || t[1] !== 'java.security.Key') return;
+        ov.implementation = function () {
+          var r = ov.apply(this, arguments);
+          try {
+            var k = arguments[1], enc = null;
+            try { enc = k.getEncoded(); } catch (e) {}
+            var kk = hexOf(enc), iv = null;
+            try { iv = hexOf(this.getIV()); } catch (e) {}
+            cryptoEmit({ kind: 'cipher_init', alg: trunc(this.getAlgorithm(), 80),
+                         mode: arguments[0] === 1 ? 'encrypt' : arguments[0] === 2 ? 'decrypt' : 'op' + arguments[0],
+                         key: kk ? kk.hex : null, key_len: kk ? kk.len : 0,
+                         key_note: kk ? '' : 'key is not extractable (hardware / Keystore-backed)',
+                         iv: iv ? iv.hex : null });
+          } catch (e) {}
+          return r;
+        };
+      });
+    });
+    ['doFinal', 'update'].forEach(function (name) {
+      tryHook('crypto_cipher_' + name, function () {
+        var Cipher = Java.use('javax.crypto.Cipher');
+        Cipher[name].overloads.forEach(function (ov) {
+          var t = ov.argumentTypes.map(function (x) { return x.className; });
+          if (t.length && t[0] !== '[B') return;
+          ov.implementation = function () {
+            var r = ov.apply(this, arguments);
+            try {
+              var a = arguments, inp = null;
+              if (a.length === 1) inp = hexOf(a[0]);
+              else if (a.length === 3) inp = hexOf(a[0], a[1], a[2]);
+              else if (a.length === 0) inp = null;
+              else inp = hexOf(a[0]);
+              var out = hexOf(r);
+              cryptoEmit({ kind: 'cipher_' + name, alg: trunc(this.getAlgorithm(), 80),
+                           input: inp ? inp.hex : null, in_len: inp ? inp.len : 0,
+                           output: out ? out.hex : null, out_len: out ? out.len : 0 });
+            } catch (e) {}
+            return r;
+          };
+        });
+      });
+    });
+    tryHook('crypto_mac', function () {
+      var Mac = Java.use('javax.crypto.Mac');
+      Mac.init.overloads.forEach(function (ov) {
+        var t = ov.argumentTypes.map(function (x) { return x.className; });
+        if (!t.length || t[0] !== 'java.security.Key') return;
+        ov.implementation = function () {
+          var r = ov.apply(this, arguments);
+          try {
+            var enc = null; try { enc = arguments[0].getEncoded(); } catch (e) {}
+            var kk = hexOf(enc);
+            cryptoEmit({ kind: 'mac_init', alg: trunc(this.getAlgorithm(), 40), key: kk ? kk.hex : null, key_len: kk ? kk.len : 0 });
+          } catch (e) {}
+          return r;
+        };
+      });
+      Mac.doFinal.overloads.forEach(function (ov) {
+        var t = ov.argumentTypes.map(function (x) { return x.className; });
+        if (t.length !== 1 || t[0] !== '[B') return;
+        ov.implementation = function (d) {
+          var r = ov.call(this, d);
+          try {
+            var i = hexOf(d), o = hexOf(r);
+            cryptoEmit({ kind: 'mac', alg: trunc(this.getAlgorithm(), 40), input: i ? i.hex : null, in_len: i ? i.len : 0,
+                         output: o ? o.hex : null, out_len: o ? o.len : 0 });
+          } catch (e) {}
+          return r;
+        };
+      });
+    });
+    tryHook('crypto_digest', function () {
+      var MD = Java.use('java.security.MessageDigest');
+      var ov = MD.digest.overload('[B');
+      ov.implementation = function (d) {
+        var r = ov.call(this, d);
+        try {
+          var i = hexOf(d), o = hexOf(r);
+          cryptoEmit({ kind: 'digest', alg: trunc(this.getAlgorithm(), 40), input: i ? i.hex : null, in_len: i ? i.len : 0,
+                       output: o ? o.hex : null, out_len: o ? o.len : 0 });
+        } catch (e) {}
+        return r;
+      };
+    });
+    tryHook('crypto_secretkeyspec', function () {
+      var SKS = Java.use('javax.crypto.spec.SecretKeySpec');
+      var ov = SKS.$init.overload('[B', 'java.lang.String');
+      ov.implementation = function (k, alg) {
+        try { var kk = hexOf(k); cryptoEmit({ kind: 'key', alg: trunc(alg, 40), key: kk ? kk.hex : null, key_len: kk ? kk.len : 0 }); } catch (e) {}
+        return ov.call(this, k, alg);
+      };
+    });
+  }
+
   // --- debuggable WebViews -----------------------------------------------------------------
   tryHook('webview', function () {
     var WV = Java.use('android.webkit.WebView');
@@ -122,6 +239,7 @@ function install() {
 // The host sends {type:'config', skip:[hook names]} right after loading; hooks go in only then.
 recv('config', function (m) {
   SKIP = (m && m.skip) || [];
+  CRYPTO = !!(m && m.crypto);
   // Some apps crash if the Java bridge starts before they have booted; the host can ask for a delay.
   setTimeout(function () { Java.perform(install); }, (m && m.delay_ms) || 0);
 });

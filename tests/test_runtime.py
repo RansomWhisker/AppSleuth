@@ -142,6 +142,46 @@ class Breakdown(unittest.TestCase):
         self.assertIn("hunter2", open(path).read())
 
 
+class DumpCrypto(unittest.TestCase):
+    EV = [{"t": "crypto", "kind": "cipher_init", "alg": "AES/CBC/PKCS5Padding", "mode": "encrypt",
+           "key": "00112233445566778899aabbccddeeff", "key_len": 16, "iv": "00" * 16},
+          {"t": "crypto", "kind": "cipher_doFinal", "alg": "AES/CBC/PKCS5Padding", "input": b"password=hunter2".hex(),
+           "in_len": 17, "output": "ab" * 16, "out_len": 16},
+          {"t": "crypto", "kind": "mac", "alg": "HmacSHA256", "key": b"k3y".hex(), "key_len": 3,
+           "input": b"msg".hex(), "in_len": 3, "output": "cd" * 32, "out_len": 32}]
+
+    def test_lines_show_keys_ivs_and_plaintext(self):
+        text = "\n".join(runtime.crypto_lines(self.EV))
+        self.assertIn("00112233445566778899aabbccddeeff", text)
+        self.assertIn('"password=hunter2"', text)
+        self.assertIn("Keys and IVs", text)
+
+    def test_redact_hides_values(self):
+        text = "\n".join(runtime.crypto_lines(self.EV, reveal=False))
+        self.assertNotIn("00112233", text)
+        self.assertNotIn("hunter2", text)
+        self.assertIn("<17 bytes>", text)
+
+    def test_no_events_message(self):
+        self.assertIn("No crypto operations", runtime.crypto_lines([{"t": "net", "host": "a"}])[0])
+
+    def test_zero_iv_finding_and_iv_reuse(self):
+        r = runtime.events_to_result(self.EV, "android", "x")
+        self.assertIn("All-zero IV used for encryption (observed)", [f["title"] for f in r["findings"]])
+        ev = [{"t": "crypto", "kind": "cipher_init", "alg": "AES/CBC", "mode": "encrypt", "key": "aa" * 16, "iv": "11" * 16}] * 2
+        r = runtime.events_to_result(ev, "android", "x")
+        self.assertIn("Same key and IV reused for several encryptions (observed)", [f["title"] for f in r["findings"]])
+
+    def test_dump_crypto_file(self):
+        import os, tempfile, json
+        path = os.path.join(tempfile.mkdtemp(), "c.jsonl")
+        self.assertEqual(runtime.dump_crypto(self.EV, path), 3)
+        self.assertIn("00112233445566778899aabbccddeeff", open(path).read())
+        runtime.dump_crypto(self.EV, path, redact=True)
+        self.assertNotIn("00112233", open(path).read())
+        self.assertEqual(oct(os.stat(path).st_mode & 0o777), "0o600")
+
+
 if __name__ == "__main__":
     unittest.main()
 
