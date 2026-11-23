@@ -13,6 +13,7 @@ One tool for mobile app security triage. Works on macOS, Linux and Windows (devi
 | `appsleuth endpoints app.ipa` | Every host and API path the app references, labelled first-party / known SDK / other, with raw-IP, cleartext, tunnel and staging flags |
 | `appsleuth links app.apk [--check-network]` | Deep links, custom URL schemes, App Links / Universal Links, exposed handlers; optionally verifies `assetlinks.json` / `apple-app-site-association` |
 | `appsleuth cloud app.apk [--check]` | Firebase / S3 / GCS / Azure backends the app uses; opt-in read-only test of whether they are open to anonymous access |
+| `appsleuth files app.ipa [FILE]` | List the important files inside the package (Info.plist, GoogleService-Info.plist, capacitor.config.json, provisioning profile, network security config, ...) and open any file, decoded |
 | `appsleuth data` | Pull an app's data container from a jailbroken iPhone (SSH) or an Android device (adb) and audit it, or audit a directory you already pulled |
 
 `appsleuth <file>` is shorthand for `scan`.
@@ -64,6 +65,19 @@ Output goes to the terminal. Add `--report` (any command) to also write `report.
 example a new build downloaded as `app-2.0.apk`): the file name is not part of a finding's identity.
 
 **Encrypted IPAs:** if the main binary (or a framework) is still FairPlay-encrypted, AppSleuth cannot see its code, so it prints a warning and puts it at the top of every report. A clean result on such a file does not mean the app is secure; re-dump it decrypted and scan again.
+
+## Browsing files inside the package (`files`)
+
+    appsleuth files app.ipa                         # numbered list of the important files; on a terminal it then asks which to open
+    appsleuth files app.ipa Info.plist              # print a file by name, path or list number (several allowed)
+    appsleuth files app.ipa GoogleService-Info.plist capacitor.config.json
+    appsleuth files app.apk AndroidManifest.xml     # compiled Android XML is decoded to text
+    appsleuth files app.ipa --all --grep "*.plist"  # every file, filtered by substring or * glob
+    appsleuth files app.ipa --save ./out            # extract the listed (or named) files
+
+Binary plists and `embedded.mobileprovision` are shown as XML, compiled Android XML as text, JSON pretty-printed; other
+binary files as a hex dump (`--hex` forces it, `--raw` skips decoding, `--full` lifts the 400 KB cap). File content goes to
+stdout and status lines to stderr, so it pipes cleanly. Nothing is masked.
 
 ## Intel commands: network use and consent
 

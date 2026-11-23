@@ -20,7 +20,7 @@ from . import __version__, diff as diff_mod, engine, info as info_mod, triage
 from .style import Term
 from . import banner
 
-COMMANDS = ("scan", "info", "diff", "data", "runtime", "sbom", "endpoints", "links", "cloud", "version")
+COMMANDS = ("scan", "info", "diff", "data", "runtime", "sbom", "endpoints", "links", "cloud", "files", "version")
 _SEV_RANK = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3}
 
 
@@ -356,6 +356,75 @@ def cmd_cloud(a):
     _intel_report(res, a, "Cloud backend check", "cloud")
 
 
+def cmd_files(a):
+    from . import appfiles, files
+    _need_file(a)
+    with appfiles.unpacked(a.target) as app:
+        shown = files.collect(app, everything=a.all, pattern=a.grep)
+        pool = files.collect(app, everything=True)
+
+        def emit(row):
+            text, how = files.render(row["path"], row["rel"], full=a.full, raw=a.raw, hexdump=a.hex)
+            print(Term.c(f"===== {row['rel']}  ({files.human(row['size'])}, {how}) =====", "dim"), file=sys.stderr)
+            sys.stdout.write(text if text.endswith("\n") else text + "\n")
+
+        def open_ref(ref):
+            if ref.isdigit():
+                hits = files.resolve(shown, ref)
+            else:       # prefer the important files (the app's own Info.plist, not every framework's)
+                hits = ("*" not in ref and files.resolve([r for r in pool if r["label"]], ref)) or files.resolve(pool, ref)
+            if not hits:
+                print(f"no file matches '{ref}' (list them with: appsleuth files {os.path.basename(a.target)} --all)",
+                      file=sys.stderr)
+                return False
+            if len(hits) > 8:
+                print(f"'{ref}' matches {len(hits)} files; be more specific, or use its number from the list:", file=sys.stderr)
+                for r in hits[:30]:
+                    print(f"  {r['rel']}", file=sys.stderr)
+                return False
+            for r in hits:
+                emit(r)
+            return True
+
+        if a.save:
+            targets = [r for ref in a.open for r in files.resolve(pool, ref)] if a.open else shown
+            n = 0
+            for r in targets:
+                dest = os.path.join(a.save, *r["rel"].replace(":", "/").split("/"))
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                shutil.copyfile(r["path"], dest)
+                n += 1
+            print(f"[+] saved {n} file(s) to {a.save}", file=sys.stderr)
+            return
+        if a.open:
+            ok = [open_ref(ref) for ref in a.open]
+            if not all(ok):
+                sys.exit(1)
+            return
+        if not shown:
+            print("No matching files. Use --all to list everything in the package.", file=sys.stderr)
+            return
+        width = len(str(len(shown)))
+        for i, r in enumerate(shown, 1):
+            lab = Term.c(f"  [{r['label']}]", "dim") if r["label"] else ""
+            print(f"{str(i).rjust(width)}  {r['rel']}  {Term.c(files.human(r['size']), 'dim')}{lab}")
+        if a.all:
+            print(Term.c(f"{len(shown)} file(s)", "dim"))
+        else:
+            print(Term.c(f"{len(shown)} important file(s); --all lists every file, --grep PATTERN filters", "dim"))
+        if sys.stdin.isatty() and sys.stdout.isatty() and not a.no_prompt:
+            while True:
+                try:
+                    ref = input("\nOpen file (number, name or pattern; q to quit): ").strip()
+                except EOFError:
+                    break
+                if not ref or ref.lower() in ("q", "quit", "exit"):
+                    break
+                open_ref(ref)
+        else:
+            print(Term.c(f"Open one with: appsleuth files {os.path.basename(a.target)} <number|name>", "dim"))
+
+
 # ------------------------------------------------------------------------ data
 
 def cmd_runtime(a):
@@ -538,7 +607,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="appsleuth", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"appsleuth {__version__}")
-    sub = ap.add_subparsers(dest="cmd", metavar="{scan,info,diff,data,runtime,sbom,endpoints,links,cloud}")
+    sub = ap.add_subparsers(dest="cmd", metavar="{scan,info,diff,data,runtime,sbom,endpoints,links,cloud,files}")
 
     def triage_opts(p):
         p.add_argument("--ignore-file", help="ignore rules (default: ./.appsleuth-ignore if present)")
@@ -634,6 +703,20 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--ignore-file")
     r.add_argument("--min-severity", choices=["INFO", "LOW", "MEDIUM", "HIGH"])
     r.set_defaults(fn=cmd_runtime)
+    f = sub.add_parser("files", help="list the important files in an app (Info.plist, GoogleService-Info.plist, "
+                                      "capacitor.config.json, ...) and open any of them, decoded")
+    f.add_argument("target", help="IPA, APK, APKS/XAPK or AAB")
+    f.add_argument("open", nargs="*", metavar="FILE",
+                   help="file(s) to print: a number from the list, a name (Info.plist), a path, or a pattern (*.plist)")
+    f.add_argument("--all", action="store_true", help="list every file in the package, not just the important ones")
+    f.add_argument("--grep", metavar="PATTERN", help="only list files whose path matches (substring or * glob)")
+    f.add_argument("--save", metavar="DIR", help="extract the listed (or named) files into DIR instead of printing")
+    f.add_argument("--full", action="store_true", help="do not truncate large files")
+    f.add_argument("--raw", action="store_true", help="print bytes as stored: no plist / compiled-XML / JSON decoding")
+    f.add_argument("--hex", action="store_true", help="show a hex dump")
+    f.add_argument("--no-prompt", action="store_true", help="never ask which file to open (default asks on a terminal)")
+    f.set_defaults(fn=cmd_files)
+
     def intel(name, helptext, fn):
         p = sub.add_parser(name, help=helptext)
         p.add_argument("target", help="IPA, APK, APKS/XAPK or AAB")
