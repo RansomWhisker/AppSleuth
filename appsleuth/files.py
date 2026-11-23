@@ -202,3 +202,57 @@ def _clip(text: str, limit: Optional[int]) -> str:
     if limit is None or len(text) <= limit:
         return text
     return text[:limit] + f"\n... truncated at {limit} characters (use --full or --save for the whole file)\n"
+
+
+# ---------------------------------------------------------------- search
+
+_SKIP_BINARY = re.compile(r"\.(png|jpe?g|gif|webp|heic|ico|icns|car|mp3|mp4|m4a|mov|wav|caf|ttf|otf|woff2?|nib|storyboardc|mom|momd)$", re.I)
+MAX_SEARCH_BYTES = 200 * 1024 * 1024
+
+
+def compile_term(term: str, *, regex: bool = False, case: bool = False) -> re.Pattern:
+    flags = 0 if case else re.I
+    return re.compile(term if regex else re.escape(term), flags)
+
+
+def search_file(path: str, rel: str, rx: re.Pattern, *, term: str, regex: bool, case: bool,
+                context: int = 0, max_hits: int = 50) -> List[Tuple[str, str]]:
+    """-> [(location, text)]. Decoded text (plist, compiled XML, JSON, source) is searched line by line;
+    other binaries are searched as raw ASCII and UTF-16 strings, reported by byte offset."""
+    if _size(path) > MAX_SEARCH_BYTES:
+        return []
+    text, how = render(path, rel, full=True)
+    hits: List[Tuple[str, str]] = []
+    if not how.startswith("binary"):
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            if rx.search(line):
+                lo, hi = max(0, i - context), min(len(lines), i + context + 1)
+                snippet = "\n".join(l[:300] for l in lines[lo:hi]) if context else line.strip()[:300]
+                hits.append((f"{i + 1}", snippet))
+                if len(hits) >= max_hits:
+                    break
+        return hits
+    if _SKIP_BINARY.search(rel):
+        return []
+    with open(path, "rb") as fh:
+        data = fh.read()
+    pats = [re.compile(rx.pattern.encode("utf-8"), rx.flags & re.I)]
+    if not regex:
+        pats.append(re.compile(re.escape(term.encode("utf-16-le")), re.I if not case else 0))
+    seen = set()
+    for bp in pats:
+        for m in bp.finditer(data):
+            if m.start() in seen:
+                continue
+            seen.add(m.start())
+            utf16 = bp is not pats[0]
+            lo, hi = max(0, m.start() - 40 * (2 if utf16 else 1)), m.end() + 40 * (2 if utf16 else 1)
+            chunk = data[lo:hi]
+            if utf16:
+                chunk = chunk.replace(b"\x00", b"")
+            snippet = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+            hits.append((f"0x{m.start():x}", snippet))
+            if len(hits) >= max_hits:
+                return hits
+    return sorted(hits, key=lambda h: int(h[0], 16))

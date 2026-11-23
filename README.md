@@ -73,11 +73,18 @@ example a new build downloaded as `app-2.0.apk`): the file name is not part of a
     appsleuth files app.ipa GoogleService-Info.plist capacitor.config.json
     appsleuth files app.apk AndroidManifest.xml     # compiled Android XML is decoded to text
     appsleuth files app.ipa --all --grep "*.plist"  # every file, filtered by substring or * glob
+    appsleuth files app.ipa --search apikey         # search every file's contents (add --regex, --case, -C 2)
+    appsleuth files app.ipa -s AIza Info.plist      # search only the named file(s) or --grep matches
     appsleuth files app.ipa --save ./out            # extract the listed (or named) files
 
 Binary plists and `embedded.mobileprovision` are shown as XML, compiled Android XML as text, JSON pretty-printed; other
 binary files as a hex dump (`--hex` forces it, `--raw` skips decoding, `--full` lifts the 400 KB cap). File content goes to
 stdout and status lines to stderr, so it pipes cleanly. Nothing is masked.
+
+`--search TERM` (ignores case; `--case`, `--regex`, `-C N` context) looks inside every file: decoded plists, compiled
+Android XML, JSON and source are searched line by line (`file:line: text`); other binaries, such as the main Mach-O or
+`classes.dex`, are searched as ASCII and UTF-16 strings and reported by byte offset (`file:0x1a2b: ...`). Images, fonts and
+similar media are skipped. Exit status is 1 when nothing matches, like grep.
 
 ## Intel commands: network use and consent
 

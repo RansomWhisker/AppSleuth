@@ -87,6 +87,25 @@ class FilesCommand(unittest.TestCase):
         out, _, _ = run(p, "embedded.mobileprovision")
         self.assertIn("dev profile", out)
 
+    def test_search_text_plist_binary_and_utf16(self):
+        p = os.path.join(tempfile.mkdtemp(), "t.ipa")
+        with zipfile.ZipFile(p, "w") as z:
+            z.writestr("Payload/T.app/Info.plist", plistlib.dumps({"CFBundleIdentifier": "com.t.app", "K": "SecretValue"}, fmt=plistlib.FMT_BINARY))
+            z.writestr("Payload/T.app/T", b"\x00\x01api_key=hunter2\x00\x02" + "wide-hunter2".encode("utf-16-le"))
+            z.writestr("Payload/T.app/pic.png", b"\x00hunter2")
+        out, err, code = run(p, "--search", "secretvalue")
+        self.assertIn("Info.plist:", out)
+        self.assertIn("SecretValue", out)
+        out, err, code = run(p, "-s", "hunter2")
+        self.assertEqual(out.count("T.app/T:"), 2)       # ASCII and UTF-16 hits
+        self.assertNotIn("pic.png", out)                 # media skipped
+        out, _, code = run(p, "-s", "secretvalue", "--case")
+        self.assertEqual(code, 1)
+        out, _, code = run(p, "-s", r"api_key=\w+", "--regex")
+        self.assertIn("api_key=hunter2", out)
+        out, _, _ = run(p, "-s", "hunter2", "Info.plist")  # restricted to named file
+        self.assertEqual(out, "")
+
 
 if __name__ == "__main__":
     unittest.main()

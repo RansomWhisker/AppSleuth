@@ -386,6 +386,34 @@ def cmd_files(a):
                 emit(r)
             return True
 
+        if a.search:
+            import re as _re
+            try:
+                rx = files.compile_term(a.search, regex=a.regex, case=a.case)
+            except _re.error as e:
+                die(f"bad --regex pattern: {e}", 2)
+            if a.open:
+                scope = [r for ref in a.open for r in files.resolve(pool, ref)]
+            else:
+                scope = files.collect(app, everything=True, pattern=a.grep)
+            total = nfiles = 0
+            for r in scope:
+                try:
+                    hits = files.search_file(r["path"], r["rel"], rx, term=a.search, regex=a.regex, case=a.case,
+                                             context=a.context)
+                except OSError:
+                    continue
+                if not hits:
+                    continue
+                nfiles += 1
+                total += len(hits)
+                for loc, text in hits:
+                    sep = "\n" if "\n" in text else " "
+                    print(f"{Term.c(r['rel'], 'dim')}:{loc}:{sep}{text}")
+            print(f"[+] {total} match(es) in {nfiles} of {len(scope)} file(s) searched", file=sys.stderr)
+            if not total:
+                sys.exit(1)
+            return
         if a.save:
             targets = [r for ref in a.open for r in files.resolve(pool, ref)] if a.open else shown
             n = 0
@@ -710,6 +738,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="file(s) to print: a number from the list, a name (Info.plist), a path, or a pattern (*.plist)")
     f.add_argument("--all", action="store_true", help="list every file in the package, not just the important ones")
     f.add_argument("--grep", metavar="PATTERN", help="only list files whose path matches (substring or * glob)")
+    f.add_argument("-s", "--search", metavar="TERM",
+                   help="search file contents for TERM (decoded plists / compiled XML / JSON line by line, other binaries "
+                        "as ASCII and UTF-16 strings); searches every file, or only the named FILEs / --grep matches")
+    f.add_argument("--regex", action="store_true", help="treat --search TERM as a regular expression")
+    f.add_argument("--case", action="store_true", help="make --search case-sensitive (default: ignore case)")
+    f.add_argument("-C", "--context", type=int, default=0, metavar="N", help="lines of context around each text match")
     f.add_argument("--save", metavar="DIR", help="extract the listed (or named) files into DIR instead of printing")
     f.add_argument("--full", action="store_true", help="do not truncate large files")
     f.add_argument("--raw", action="store_true", help="print bytes as stored: no plist / compiled-XML / JSON decoding")
