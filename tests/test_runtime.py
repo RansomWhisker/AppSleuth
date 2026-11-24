@@ -182,6 +182,18 @@ class DumpCrypto(unittest.TestCase):
         self.assertEqual(oct(os.stat(path).st_mode & 0o777), "0o600")
 
 
+class AgentProblems(unittest.TestCase):
+    def test_android_without_ready_explains_it_is_not_frida_server(self):
+        p = runtime.agent_problems([{"t": "agent_error", "what": "TypeError: x is not a function"}], "android")
+        text = " ".join(p)
+        self.assertIn("TypeError", text)
+        self.assertIn("frida-server is fine", text)
+
+    def test_ready_means_no_problem(self):
+        self.assertEqual(runtime.agent_problems([{"t": "ready"}], "android"), [])
+        self.assertEqual(runtime.agent_problems([], "ios"), [])
+
+
 if __name__ == "__main__":
     unittest.main()
 

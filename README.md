@@ -86,6 +86,17 @@ Android XML, JSON and source are searched line by line (`file:line: text`); othe
 `classes.dex`, are searched as ASCII and UTF-16 strings and reported by byte offset (`file:0x1a2b: ...`). Images, fonts and
 similar media are skipped. Exit status is 1 when nothing matches, like grep.
 
+## Interactive shell and tab completion
+
+    appsleuth shell                          # prompt with history and TAB completion, like objection
+    appsleuth> use app.ipa                   # set the current target; later commands need no file argument
+    appsleuth (app.ipa)> files <TAB>         # completes names inside the package (Info.plist, GoogleService-Info.plist, ...)
+    appsleuth (app.ipa)> info --<TAB>        # completes flags; flag values complete too (--show HIGH|MEDIUM|...)
+    appsleuth (app.ipa)> data --android -p <TAB>    # completes installed Android package names (adb)
+
+Built-ins: `use`, `help [command]`, `ls`, `cd`, `pwd`, `clear`, `exit`. History is kept in `~/.appsleuth_history`. For the
+normal command line, enable completion with `eval "$(appsleuth completion zsh)"` (or `bash`) in your shell profile.
+
 ## Intel commands: network use and consent
 
 `sbom`, `endpoints`, `links` and `cloud` run **offline by default**. Anything that touches the network is opt-in:
@@ -140,6 +151,16 @@ Findings are leads for manual review, not confirmed vulnerabilities; each carrie
 ## `appsleuth data` safety
 
 On iOS, `data` also reads the app's keychain: item metadata over SSH (`keychain-2.db`) and, by default, the item **values**, through a read-only `SecItemCopyMatching` query run inside the app with Frida (needs frida-server; the app is launched and closed again if it is not running). Only items the app itself can read are returned; `--no-keychain-values` skips the Frida step and `--redact` masks values in the output. Values are saved in `keychain.json` (mode 600). A keychain secret that also appears verbatim in the app's data files is reported as HIGH.
+
+`data` pulls only what static testing needs, not the whole container: preferences (`shared_prefs/*.xml`, `Library/Preferences`),
+databases (`.db` / `-wal`), web storage (`app_webview`, `Library/WebKit`, cookies), Jetpack DataStore, `Cache.db`, and
+config / credential-like files (`.json`, `.plist`, `.properties`, or names containing token, session, auth, key, ...). Caches,
+images, media, fonts, native libraries and code are skipped, and on Android (root / `run-as`) only those folders are
+requested from the device. The summary line says how many files were skipped; `--full-pull` restores the whole folder.
+
+`data` prints the values in the terminal: every finding's evidence (`key = value`) and a "Stored values" section listing the
+important preference / plist / JSON entries per file (credential-like keys, tokens, URLs, e-mail addresses, keys); `--all-values`
+lists every key and `--redact` hides the values. `runtime` likewise prints captured values under each finding.
 
 Found values (tokens, passwords, keys, headers) are **shown in full** so you can verify and reproduce a finding; the reports therefore contain real credentials, so treat them as sensitive. Add `--redact` to mask values instead. Pulled archives are extracted defensively (regular files only, no links, no traversal, size/count caps); SQLite is opened read-only with an authorizer; XML with a DOCTYPE is refused; host/user/package inputs are validated and shell-quoted. Only use it on devices and apps you are authorised to test.
 

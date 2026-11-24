@@ -405,6 +405,35 @@ def _keychain_findings(kc: Dict[str, Any], add) -> None:
                 evidence=ev(group), location="keychain-2.db", confidence="confirmed")
 
 
+_IMPORTANT_VALUE = re.compile(r"(?i)(https?://|[\w.+-]+@[\w-]+\.[\w.]+|eyJ[\w-]{6,}\.|AIza[\w-]{20,}|AKIA[A-Z0-9]{12,}|-----BEGIN)")
+
+
+def value_lines(meta: Dict[str, Any], everything: bool = False, color=None, width: int = 160) -> List[str]:
+    """Terminal view of the stored preferences / plist / JSON values: the important ones, or all with everything=True."""
+    c = color or (lambda s, _k=None: s)
+    vals = meta.get("stored_values") or {}
+    total = sum(len(v) for v in vals.values())
+    if not total:
+        return []
+    shown = 0
+    body: List[str] = []
+    for rel in sorted(vals):
+        rows = [r for r in vals[rel] if everything or r[2]]
+        if not rows:
+            continue
+        body.append("  " + c(rel, "bold") + c(f"  ({len(vals[rel])} key(s))", "dim"))
+        for k, text, imp in rows[:200]:
+            t = text.replace("\n", "\\n")
+            t = t if len(t) <= width else t[:width - 1] + "…"
+            body.append(f"    {c(k, 'MEDIUM') if imp else k} = {t}")
+            shown += 1
+        if len(rows) > 200:
+            body.append(c(f"    … {len(rows) - 200} more", "dim"))
+    head = c(f"Stored values ({'all' if everything else 'important'}: {shown} of {total})", "bold")
+    foot = [] if everything else [c("  (--all-values lists every key; --redact hides the values)", "dim")]
+    return [head] + (body or [c("  nothing noteworthy", "dim")]) + foot
+
+
 def audit_dir(root: str, platform: str = "ios", *, reveal: bool = True,
               manifest: Optional[Dict[str, Any]] = None,
               keychain: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -415,6 +444,18 @@ def audit_dir(root: str, platform: str = "ios", *, reveal: bool = True,
     def add(sev, title, detail, evidence=None, location=None, confidence="heuristic"):
         findings.append({"severity": sev, "title": title, "detail": detail, "evidence": evidence,
                          "location": location, "confidence": confidence})
+
+    values: Dict[str, List[List[Any]]] = {}
+
+    def _rec(rel: str, k: str, v: Any):
+        """Remember every stored key/value so the terminal can list them (important ones flagged)."""
+        leaf = re.sub(r"\[\d+\]", "", str(k)).rsplit(".", 1)[-1]
+        text = redact(v, reveal)
+        important = False
+        if not isinstance(v, (bool, int, float)) and v is not None and str(v).strip():
+            desc, strong = classify_value(v)
+            important = bool(strong or sensitive_key(leaf) or _IMPORTANT_VALUE.search(str(v)[:2000] if not isinstance(v, (bytes, bytearray)) else ""))
+        values.setdefault(rel, []).append([str(k), text, important])
 
     types: Counter = Counter()
     sizes: List[Tuple[int, str]] = []
@@ -450,6 +491,7 @@ def audit_dir(root: str, platform: str = "ios", *, reveal: bool = True,
                 types["plist"] += 1
                 obj = plistlib.loads(_read(full))
                 for k, v in _plist_items(obj):
+                    _rec(rel, k, v)
                     leaf = k.rsplit(".", 1)[-1]
                     cat = sensitive_key(leaf)
                     if cat:
@@ -459,6 +501,7 @@ def audit_dir(root: str, platform: str = "ios", *, reveal: bool = True,
             elif low.endswith(".xml") and "shared_prefs" in low:
                 types["shared_prefs"] += 1
                 for k, v in _shared_prefs_items(_read(full)):
+                    _rec(rel, k, v)
                     cat = sensitive_key(k)
                     if cat:
                         desc, strong = classify_value(v)
@@ -471,6 +514,7 @@ def audit_dir(root: str, platform: str = "ios", *, reveal: bool = True,
                 types["json"] += 1
                 obj = json.loads(_read(full).decode("utf-8", errors="replace"))
                 for k, v in _plist_items(obj):
+                    _rec(rel, k, v)
                     leaf = re.sub(r"\[\d+\]", "", k).rsplit(".", 1)[-1]
                     cat = sensitive_key(leaf)
                     if cat:
@@ -557,6 +601,7 @@ def audit_dir(root: str, platform: str = "ios", *, reveal: bool = True,
             "similar encrypted stores look like. This is a positive signal.", evidence=", ".join(enc[:6]),
             confidence="heuristic")
 
+    meta["stored_values"] = values
     if keychain is not None:
         meta["keychain"] = keychain if reveal else mask_keychain(keychain)
         _keychain_findings(keychain, add)

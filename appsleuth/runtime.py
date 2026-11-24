@@ -239,6 +239,20 @@ _NET_EVENTS = ("net", "cleartext", "socket")
 _APPLE_HOST = re.compile(r"(^|\.)(apple\.com|icloud\.com|mzstatic\.com|apple-dns\.net|local|localhost|in-addr\.arpa|ip6\.arpa)$")
 
 
+def agent_problems(events: Iterable[Dict[str, Any]], platform: str) -> List[str]:
+    """Plain-language reasons the probe may have seen nothing, from what the agent itself reported.
+    Reaching this point means Frida connected and the agent loaded, so frida-server is running."""
+    ev = _jsonable_events(events)
+    errs = sorted({e.get("what", "") for e in ev if e["t"] == "agent_error"})
+    perr = sorted({e.get("what", "") for e in ev if e["t"] == "probe_error"})
+    out = [f"agent error: {x}" for x in errs[:5]] + [f"hook could not be installed: {x}" for x in perr[:5]]
+    if platform == "android" and not any(e["t"] == "ready" for e in ev):
+        out.append("the Android agent never finished installing its hooks (no 'ready' event). Frida is connected, "
+                   "so frida-server is fine; the Java bridge did not start in this app. Try --spawn, or set "
+                   "APPSLEUTH_HOOK_DELAY_MS=3000 to give the app time to boot, and make sure the app is in the foreground.")
+    return out
+
+
 def hook_breakdown(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Per-hook picture of a run: [{name, installed, calls, events, types}], sorted busiest first.
 
@@ -487,6 +501,9 @@ def run_probe(platform: str, target: str, *, seconds: int = 60, spawn: bool = Fa
     events: List[Dict[str, Any]] = []
 
     def on_message(msg, _data):
+        if msg.get("type") == "error":      # an exception inside the agent: keep it, it explains "no events"
+            events.append({"t": "agent_error", "what": str(msg.get("description") or msg.get("stack") or msg)[:300]})
+            return
         p = msg.get("payload")
         if msg.get("type") == "send" and isinstance(p, dict) and (len(events) < MAX_EVENTS or p.get("t") == "hook_stats"):
             events.append(p)

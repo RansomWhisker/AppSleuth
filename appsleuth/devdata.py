@@ -72,14 +72,51 @@ def win_safe_name(name: str) -> str:
     return "/".join(out)
 
 
-def safe_extract_tar(tar_path: str, dest: str, *, rename=None, max_files: int = DEFAULT_MAX_FILES,
+# ---- what is worth pulling for static testing ------------------------------------------------
+_JUNK_PARTS = {"cache", "caches", "code_cache", "code cache", "gpucache", "shadercache", "grshadercache", "dawncache",
+               "no_backup", "lib", "oat", "snapshots", "splashboard", "fscacheddata", "tmp", "app_textures",
+               "image_manager_disk_cache", "service worker"}
+_JUNK_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".svg", ".ico", ".mp3", ".mp4", ".mov", ".m4a", ".wav",
+             ".caf", ".aac", ".ogg", ".ttf", ".otf", ".woff", ".woff2", ".so", ".dex", ".odex", ".vdex", ".art", ".apk",
+             ".jar", ".car", ".nib", ".lock", ".tmp", ".shm", ".bin", ".pak", ".zip"}
+_KEEP_DIRS = {"android": ("shared_prefs/", "databases/", "app_webview/"),
+              "ios": ("library/preferences/", "library/cookies/", "library/webkit/")}
+_DATA_EXT = {".json", ".xml", ".plist", ".txt", ".properties", ".cfg", ".conf", ".ini", ".env", ".yaml", ".yml", ".pref",
+             ".db", ".sqlite", ".sqlite3", ".db3", ".realm", ".preferences_pb", ".pb", ".localstorage", ".log", ".js",
+             ".html", ".csv", ".keystore", ".jks", ".pem", ".p12", ".key"}
+_SENSITIVE_NAME = re.compile(r"(?i)(token|session|auth|cred|secret|key|cookie|login|account|user|config|setting|pref|store|cert)")
+_MAX_OTHER = 2 << 20
+
+
+def is_important(rel: str, size: int, platform: str) -> bool:
+    """Keep what static testing reads (preferences, databases, web storage, config/credential-like files);
+    drop caches, media, fonts, code and other bulk."""
+    low = rel.replace("\\", "/").lower()
+    parts = low.split("/")
+    base = parts[-1]
+    ext = os.path.splitext(base)[1]
+    if base == "cache.db":                                  # NSURLCache / OkHttp: cached responses and URLs
+        return True
+    if any(p in _JUNK_PARTS for p in parts[:-1]) or ext in _JUNK_EXT:
+        return False
+    if base.endswith("-shm"):
+        return False
+    if low.startswith(_KEEP_DIRS.get(platform, ())):
+        return True
+    if size > _MAX_OTHER and ext not in (".db", ".sqlite", ".sqlite3", ".realm"):
+        return False
+    return ext in _DATA_EXT or bool(_SENSITIVE_NAME.search(base))
+
+
+def safe_extract_tar(tar_path: str, dest: str, *, rename=None, keep=None, max_files: int = DEFAULT_MAX_FILES,
                      max_bytes: int = DEFAULT_MAX_BYTES) -> Dict[str, Any]:
     """Unpack regular files and directories only. Returns {'modes': {rel: mode}, 'skipped': n, ...}.
-    `rename(name) -> name|None` can remap or drop members (used for Android backups)."""
+    `rename(name) -> name|None` can remap or drop members (used for Android backups).
+    `keep(name, size) -> bool` drops files that are not needed (counted as 'filtered_out', not toward the limits)."""
     os.makedirs(dest, exist_ok=True)
     root = os.path.realpath(dest)
     modes: Dict[str, int] = {}
-    skipped = files = total = 0
+    skipped = files = total = filtered = 0
     with tarfile.open(tar_path) as t:
         for m in t:
             name = m.name.lstrip("./") if m.name.startswith("./") else m.name
@@ -102,6 +139,9 @@ def safe_extract_tar(tar_path: str, dest: str, *, rename=None, max_files: int = 
             if not m.isreg():
                 skipped += 1
                 continue
+            if keep is not None and not keep(name, m.size):
+                filtered += 1
+                continue
             files += 1
             total += m.size
             if files > max_files or total > max_bytes:
@@ -115,7 +155,8 @@ def safe_extract_tar(tar_path: str, dest: str, *, rename=None, max_files: int = 
                 shutil.copyfileobj(src, out)
             os.chmod(target, 0o600)
             modes[name] = m.mode & 0o7777
-    return {"modes": modes, "skipped_links_or_special": skipped, "files": files, "bytes": total}
+    return {"modes": modes, "skipped_links_or_special": skipped, "files": files, "bytes": total,
+            "filtered_out": filtered}
 
 
 # --------------------------------------------------------------------------- iOS
@@ -258,15 +299,18 @@ def ios_list_containers(ssh: SSH, include_system: bool = False) -> List[Dict[str
     return apps
 
 
-def ios_pull(ssh: SSH, app: Dict[str, Any], out_dir: str, max_bytes: int = DEFAULT_MAX_BYTES) -> Dict[str, Any]:
+def ios_pull(ssh: SSH, app: Dict[str, Any], out_dir: str, max_bytes: int = DEFAULT_MAX_BYTES,
+             focus: bool = True) -> Dict[str, Any]:
     work = tempfile.mkdtemp(prefix="appsleuth_pull_")
     try:
         tar_path = os.path.join(work, "data.tar")
         ssh.stream_to_file(f"cd {shlex.quote(app['container'])} && tar -cf - .", tar_path, max_bytes)
-        manifest = safe_extract_tar(tar_path, out_dir, max_bytes=max_bytes)
+        manifest = safe_extract_tar(tar_path, out_dir, max_bytes=max_bytes,
+                                    keep=(lambda n, sz: is_important(n, sz, "ios")) if focus else None)
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    manifest.update({"platform": "ios", "bundle_id": app["bundle_id"], "method": "ssh", "pulled_at": int(time.time())})
+    manifest.update({"platform": "ios", "bundle_id": app["bundle_id"], "method": "ssh", "pulled_at": int(time.time()),
+                     "focused": focus})
     return manifest
 
 
@@ -388,8 +432,11 @@ def _parse_backup(ab_path: str, tar_path: str, max_bytes: int):
                 out.write(data)
 
 
+_FOCUS_DIRS = "shared_prefs databases files app_webview"      # what static testing reads; not cache/, lib/, code_cache/
+
+
 def android_pull(serial: Optional[str], pkg: str, out_dir: str, method: str = "auto",
-                 max_bytes: int = DEFAULT_MAX_BYTES, log=print) -> Dict[str, Any]:
+                 max_bytes: int = DEFAULT_MAX_BYTES, log=print, focus: bool = True) -> Dict[str, Any]:
     if not PKG_RE.match(pkg):
         raise PullError("invalid package name")
     if serial and not SERIAL_RE.match(serial):
@@ -404,10 +451,18 @@ def android_pull(serial: Optional[str], pkg: str, out_dir: str, method: str = "a
                 if m == "root":
                     if not _is_root(serial):
                         raise PullError("device is not rooted (su not available)")
-                    _android_tar(serial, f"su -c 'tar -cf - -C /data/data/{pkg} .'", tar_path, max_bytes)
+                    if focus:
+                        cmd = f"su -c 'cd /data/data/{pkg} && tar -cf - $(ls -d {_FOCUS_DIRS} 2>/dev/null)'"
+                    else:
+                        cmd = f"su -c 'tar -cf - -C /data/data/{pkg} .'"
+                    _android_tar(serial, cmd, tar_path, max_bytes)
                     rename = None
                 elif m == "run-as":
-                    _android_tar(serial, f"run-as {pkg} tar -cf - .", tar_path, max_bytes)
+                    if focus:
+                        cmd = f"run-as {pkg} sh -c 'tar -cf - $(ls -d {_FOCUS_DIRS} 2>/dev/null)'"
+                    else:
+                        cmd = f"run-as {pkg} tar -cf - ."
+                    _android_tar(serial, cmd, tar_path, max_bytes)
                     rename = None
                 elif m == "backup":
                     log("[*] Confirm the backup on the device screen (leave the password empty)...")
@@ -427,7 +482,8 @@ def android_pull(serial: Optional[str], pkg: str, out_dir: str, method: str = "a
                 else:
                     raise PullError(f"unknown method {m}")
                 used = m
-                manifest = safe_extract_tar(tar_path, out_dir, rename=rename, max_bytes=max_bytes)
+                manifest = safe_extract_tar(tar_path, out_dir, rename=rename, max_bytes=max_bytes,
+                                            keep=(lambda n, sz: is_important(n, sz, "android")) if focus else None)
                 break
             except (PullError, subprocess.TimeoutExpired, tarfile.TarError, zlib.error, OSError) as e:
                 errors.append(f"{m}: {clean(e)}")
@@ -440,5 +496,6 @@ def android_pull(serial: Optional[str], pkg: str, out_dir: str, method: str = "a
                 "(or an emulator/AVD without Play Store). Test builds can use run-as.")
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    manifest.update({"platform": "android", "package": pkg, "method": used, "pulled_at": int(time.time())})
+    manifest.update({"platform": "android", "package": pkg, "method": used, "pulled_at": int(time.time()),
+                     "focused": focus})
     return manifest

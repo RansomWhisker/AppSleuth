@@ -20,7 +20,7 @@ from . import __version__, diff as diff_mod, engine, info as info_mod, triage
 from .style import Term
 from . import banner
 
-COMMANDS = ("scan", "info", "diff", "data", "runtime", "sbom", "endpoints", "links", "cloud", "files", "version")
+COMMANDS = ("scan", "info", "diff", "data", "runtime", "sbom", "endpoints", "links", "cloud", "files", "shell", "completion", "version")
 _SEV_RANK = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3}
 
 
@@ -35,7 +35,8 @@ def _counts(s: Dict[str, int]) -> str:
     return "  ".join(Term.c(f"{s.get(k, 0)} {k.title()}", k) for k in ("HIGH", "MEDIUM", "LOW", "INFO"))
 
 
-def print_findings(result: Dict[str, Any], *, verbose: bool = False, show: str = "LOW", report: bool = True):
+def print_findings(result: Dict[str, Any], *, verbose: bool = False, show: str = "LOW", report: bool = True,
+                   evidence: bool = False):
     shown = [f for f in result["findings"] if _SEV_RANK[f["severity"]] >= _SEV_RANK[show]]
     hidden = len(result["findings"]) - len(shown)
     for f in shown:
@@ -46,8 +47,9 @@ def print_findings(result: Dict[str, Any], *, verbose: bool = False, show: str =
             print(Term.c(f"        {f['location'][:110]}", "dim"))
         if verbose:
             print(f"        {f['detail']}")
-            if f.get("evidence"):
-                print(f"        evidence: {f['evidence'][:300]}")
+        if f.get("evidence") and (verbose or evidence):       # evidence holds the captured values
+            for part in str(f["evidence"]).split("; ")[:40]:
+                print(f"        {Term.c('>', 'dim')} {part[:600]}")
     if hidden:
         what = "finding(s) in the report" if report else "note(s) not shown"
         print(Term.c(f"  … {hidden} lower-severity {what} (use --show INFO to list)", "dim"))
@@ -356,6 +358,25 @@ def cmd_cloud(a):
     _intel_report(res, a, "Cloud backend check", "cloud")
 
 
+def run_argv(argv: List[str]):
+    """Run one command line (used by the interactive shell); argparse errors surface as SystemExit."""
+    a = build_parser().parse_args(argv)
+    if not getattr(a, "fn", None):
+        build_parser().print_help()
+        return
+    a.fn(a)
+
+
+def cmd_shell(a):
+    from . import shell
+    shell.run(build_parser, run_argv)
+
+
+def cmd_completion(a):
+    from . import shell
+    sys.stdout.write(shell.completion_script(a.shell, build_parser()))
+
+
 def cmd_files(a):
     from . import appfiles, files
     _need_file(a)
@@ -486,14 +507,20 @@ def cmd_runtime(a):
     if a.report:
         write_reports(res, out, "Runtime probe")
     print(f"\n{_counts(res['summary'])}   ({res['meta']['events']} events observed)")
-    print_findings(res, verbose=a.verbose, show=a.show, report=a.report)
+    print_findings(res, verbose=a.verbose, show=a.show, report=a.report, evidence=not a.redact)
     if a.dump_crypto is not None:
         print("\n" + "\n".join(runtime.crypto_lines(events, reveal=not a.redact, color=Term.c)))
     bl = runtime.breakdown_lines(res, color=Term.c)
     if bl:
         print("\n" + "\n".join(bl))
-    if res["meta"]["events"] == 0:
-        print("No events were observed. Is frida-server running, and did you use the app during the window?")
+    problems = runtime.agent_problems(events, platform)
+    for x in problems:
+        print(Term.c("  [!] " + x, "MEDIUM"))
+    if res["meta"]["events"] == 0 and not problems:
+        print("No events were observed. Frida connected and the hooks installed, so the app simply did nothing "
+              "they watch: use it (log in, browse, trigger network calls) during the window.")
+    elif res["meta"]["events"] == 0:
+        print("No events were observed (Frida did connect to the device; see the notes above).")
     if a.report:
         print(f"Reports: {out}/report.html  report.md  report.json")
 
@@ -507,7 +534,10 @@ def cmd_data(a):
         if a.report:
             write_reports(res, out, "App data audit")
         print(f"\n{_counts(res['summary'])}")
-        print_findings(res, verbose=a.verbose, show=a.show, report=a.report)
+        print_findings(res, verbose=a.verbose, show=a.show, report=a.report, evidence=not a.redact)
+        vl = dataaudit.value_lines(res["meta"], everything=a.all_values, color=Term.c)
+        if vl:
+            print("\n" + "\n".join(vl))
         kc_lines = dataaudit.keychain_lines(keychain if not a.redact else dataaudit.mask_keychain(keychain), color=Term.c)
         if kc_lines:
             print("\n" + "\n".join(kc_lines))
@@ -553,7 +583,7 @@ def cmd_data(a):
                 return
             out = os.path.join(a.outdir or "appdata", devdata.clean(app["bundle_id"]))
             print(f"[*] Pulling data container for {app['bundle_id']} ...")
-            manifest = devdata.ios_pull(ssh, app, os.path.join(out, "data"), cap)
+            manifest = devdata.ios_pull(ssh, app, os.path.join(out, "data"), cap, focus=not a.full_pull)
             try:
                 print("[*] Reading keychain item metadata ...")
                 keychain = devdata.ios_pull_keychain(ssh, app["bundle_id"])
@@ -585,7 +615,7 @@ def cmd_data(a):
                 return
             out = os.path.join(a.outdir or "appdata", pkg)
             print(f"[*] Pulling data for {pkg} (method: {a.method}) ...")
-            manifest = devdata.android_pull(serial, pkg, os.path.join(out, "data"), a.method, cap)
+            manifest = devdata.android_pull(serial, pkg, os.path.join(out, "data"), a.method, cap, focus=not a.full_pull)
     except devdata.PullError as e:
         die(str(e), 1)
 
@@ -598,6 +628,9 @@ def cmd_data(a):
     with open(os.path.join(out, "pull_manifest.json"), "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=1)
     print(f"[+] {mf['files']} files, {mf['bytes'] / 1e6:.1f} MB via {mf['method']} -> {out}/data")
+    if mf.get("filtered_out"):
+        print(f"    ({mf['filtered_out']} unneeded file(s) skipped: caches, media, fonts, code; "
+              "use --full-pull to keep everything)")
     if mf.get("skipped_links_or_special"):
         print(f"    ({mf['skipped_links_or_special']} symlinks/special files skipped)")
     if not a.no_audit:
@@ -641,7 +674,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="appsleuth", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"appsleuth {__version__}")
-    sub = ap.add_subparsers(dest="cmd", metavar="{scan,info,diff,data,runtime,sbom,endpoints,links,cloud,files}")
+    sub = ap.add_subparsers(dest="cmd", metavar="{scan,info,diff,data,runtime,sbom,endpoints,links,cloud,files,shell,completion}")
 
     def triage_opts(p):
         p.add_argument("--ignore-file", help="ignore rules (default: ./.appsleuth-ignore if present)")
@@ -701,6 +734,11 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("-p", "--package", help="Android: package name (or substring)")
     g.add_argument("--method", choices=["auto", "root", "run-as", "backup"], default="auto",
                    help="Android access method (default: try root, run-as, backup)")
+    g.add_argument("--all-values", action="store_true",
+                   help="list every stored preference / plist / JSON key in the terminal (default: only the important ones)")
+    g.add_argument("--full-pull", action="store_true",
+                   help="pull the whole app data folder (default: only what static testing needs: preferences, "
+                        "databases, web storage, config / credential-like files; caches, media, fonts and code are skipped)")
     g.add_argument("--max-mb", type=int, default=2048, help="refuse containers larger than this")
     g.add_argument("-o", "--outdir")
     g.add_argument("--no-keychain-values", action="store_true",
@@ -760,6 +798,12 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--hex", action="store_true", help="show a hex dump")
     f.add_argument("--no-prompt", action="store_true", help="never ask which file to open (default asks on a terminal)")
     f.set_defaults(fn=cmd_files)
+
+    sh = sub.add_parser("shell", help="interactive prompt with tab completion of commands, flags, files and packages")
+    sh.set_defaults(fn=cmd_shell)
+    co = sub.add_parser("completion", help="print bash / zsh completion for the normal command line")
+    co.add_argument("shell", choices=["bash", "zsh"])
+    co.set_defaults(fn=cmd_completion)
 
     def intel(name, helptext, fn):
         p = sub.add_parser(name, help=helptext)
